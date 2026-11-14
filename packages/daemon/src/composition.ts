@@ -52,6 +52,9 @@ export function createDaemonModules(
     store: board.store,
     config: board.config,
     clock: board.clock,
+    warn: (fields, message) => {
+      board.log.warn(fields, message);
+    },
     ...(ports.productVersion === undefined ? {} : { productVersion: ports.productVersion }),
   });
   const ctx = ctxFor('gateway-slack');
