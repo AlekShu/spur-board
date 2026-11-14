@@ -2397,6 +2397,216 @@ describe('PR poll chunks', () => {
   });
 });
 
+describe('PR discovery reads', () => {
+  const cursor = '2026-01-01T00:00:00.000Z';
+  const first = '2026-01-03T00:00:00.000Z';
+  const later = '2026-01-04T00:00:00.000Z';
+  /**
+   * One source polled again and again: discovery lists `listed` (PR number -> `updatedAt`); the
+   * index and a full read answer each PR at its listed `updatedAt` in `state`, with the index
+   * rollup `rollup`; `failing` names the operation that answers 502. Each poll gets the cursor of
+   * the last accepted batch, as core hands it back; `accept: false` drops a batch, so the next
+   * poll gets the old cursor again.
+   */
+  function scenario(state: 'OPEN' | 'MERGED') {
+    let t = Date.parse('2026-01-05T00:00:00.000Z');
+    const answers = {
+      listed: new Map<number, string>(),
+      failing: undefined as Operation | undefined,
+      rollup: 'SUCCESS',
+    };
+    const fetcher = byOperation((operation, numbers) => {
+      if (operation === answers.failing) return failure();
+      if (operation === 'PrBatch')
+        return discoveryAnswer(
+          [...answers.listed].map(([number, updatedAt]) => operatorNode(number, updatedAt)),
+        );
+      if (operation === 'PrIndex')
+        return response(
+          aliased(numbers, (n) =>
+            indexPr(n, {
+              updatedAt: answers.listed.get(n) ?? time,
+              state,
+              statusCheckRollup: rollup(answers.rollup),
+            }),
+          ),
+        );
+      return response(
+        aliased(numbers, (n) => ({
+          pullRequest: {
+            ...wire(n),
+            updatedAt: answers.listed.get(n) ?? time,
+            state,
+            mergedAt: state === 'MERGED' ? time : null,
+          },
+        })),
+      );
+    });
+    const fresh = () => adapter(fetcher, config(), 0, () => t);
+    let source = fresh();
+    let accepted = cursor;
+    const poll = async (prs: ReturnType<typeof refOf>[] = [], accept = true) => {
+      fetcher.mockClear();
+      const batch = await source.poll(context(prs, accepted));
+      if (accept && batch.cursor !== undefined) accepted = batch.cursor;
+      return {
+        batch,
+        details: numbersSent(fetcher, 'PrDetails').flat(),
+        indexed: numbersSent(fetcher, 'PrIndex').flat(),
+        delivered: okFacts(batch).map((facts) => facts.number),
+      };
+    };
+    return {
+      answers,
+      poll,
+      /** The first read has no index entry and the second gives one; later polls reuse it. */
+      settle: async (accept = true) => {
+        expect(await poll([], accept)).toMatchObject({ details: [9], indexed: [] });
+        expect(await poll([], accept)).toMatchObject({ details: [9], indexed: [9] });
+      },
+      advance: (ms: number) => {
+        t += ms;
+      },
+      restart: () => {
+        source = fresh();
+      },
+      pollPr: async (number: number) => {
+        if (source.pollPr === undefined) throw new Error('Missing pollPr');
+        fetcher.mockClear();
+        await source.pollPr(refOf(number), { signal: new AbortController().signal });
+        return numbersSent(fetcher, 'PrDetails').flat();
+      },
+    };
+  }
+
+  it.each(['MERGED', 'OPEN'] as const)(
+    'reuses the cached facts of an unrequested %s PR the index shows unchanged',
+    async (state) => {
+      const run = scenario(state);
+      run.answers.listed.set(9, first);
+      await run.settle();
+      const read = await run.poll();
+
+      expect(read).toMatchObject({ details: [], indexed: [9], delivered: [9] });
+      expect(read.batch.entities).toEqual([]);
+      expect(read.batch.complete).toBe(true);
+      expect(read.batch.cursor).toBe(first);
+      expect((await run.poll()).batch.items).toEqual(read.batch.items);
+    },
+  );
+
+  it('reads the PR in full when its checks change at the same updatedAt', async () => {
+    const run = scenario('OPEN');
+    run.answers.listed.set(9, first);
+    await run.poll();
+    await run.poll();
+    run.answers.rollup = 'FAILURE';
+
+    expect(await run.poll()).toMatchObject({ details: [9], indexed: [9], delivered: [9] });
+  });
+
+  it('sends the facts again when core did not accept the batch of the last read', async () => {
+    const run = scenario('MERGED');
+    run.answers.listed.set(9, first);
+    await run.settle(false);
+
+    const again = await run.poll();
+    expect(again).toMatchObject({ details: [], delivered: [9] });
+    expect(again.batch.cursor).toBe(first);
+  });
+
+  it('sends the facts again at the cursor tie after a batch core did not accept', async () => {
+    const run = scenario('MERGED');
+    run.answers.listed.set(9, first);
+    await run.settle();
+    expect(await run.poll([], false)).toMatchObject({ details: [], delivered: [9] });
+
+    expect(await run.poll()).toMatchObject({ details: [], delivered: [9] });
+  });
+
+  it('reads a PR in full once it is no longer requested after pollPr read it', async () => {
+    const run = scenario('MERGED');
+    run.answers.listed.set(9, first);
+    expect((await run.poll([refOf(9)])).details).toEqual([9]);
+    expect(await run.pollPr(9)).toEqual([9]);
+
+    expect(await run.poll()).toMatchObject({ details: [9], delivered: [9] });
+  });
+
+  it('reads the PR again once discovery lists it newer', async () => {
+    const run = scenario('MERGED');
+    run.answers.listed.set(9, first);
+    await run.settle();
+    run.answers.listed.set(9, later);
+
+    expect((await run.poll()).details).toEqual([9]);
+    expect(await run.poll()).toMatchObject({ details: [], delivered: [9] });
+  });
+
+  it('reads the PR again once its cached read expires', async () => {
+    const run = scenario('MERGED');
+    run.answers.listed.set(9, first);
+    await run.settle();
+    run.advance(CLOSED_REFRESH_MS);
+
+    expect(await run.poll()).toMatchObject({ details: [9], delivered: [9] });
+  });
+
+  it('does not read a PR last read as requested once it is no longer requested', async () => {
+    const run = scenario('MERGED');
+    run.answers.listed.set(9, first);
+    expect((await run.poll([refOf(9)])).details).toEqual([9]);
+
+    expect(await run.poll()).toMatchObject({ details: [], indexed: [9], delivered: [9] });
+  });
+
+  it('reads a PR whose last read failed', async () => {
+    const run = scenario('MERGED');
+    run.answers.listed.set(9, first);
+    run.answers.failing = 'PrDetails';
+    const failed = await run.poll();
+    expect(failed.details).toEqual([9]);
+    expect(failed.batch.cursor).toBe(cursor);
+    run.answers.failing = undefined;
+
+    expect((await run.poll()).details).toEqual([9]);
+  });
+
+  it('forgets a PR discovery stopped listing and reads it when listed again', async () => {
+    const run = scenario('MERGED');
+    run.answers.listed.set(9, first);
+    await run.settle();
+    run.answers.listed.delete(9);
+    expect(await run.poll()).toMatchObject({ details: [], indexed: [], delivered: [] });
+    run.answers.listed.set(9, first);
+
+    expect(await run.poll()).toMatchObject({ details: [9], indexed: [] });
+  });
+
+  it('keeps the cached PR when discovery fails', async () => {
+    const run = scenario('MERGED');
+    run.answers.listed.set(9, first);
+    await run.settle();
+    run.answers.failing = 'PrBatch';
+    const failed = await run.poll([refOf(8)]);
+    expect(failed.details).toEqual([8]);
+    expect(failed.batch.complete).toBe(false);
+    run.answers.failing = undefined;
+
+    expect(await run.poll()).toMatchObject({ details: [], delivered: [9] });
+  });
+
+  it('reads a PR in full again in a fresh instance', async () => {
+    const run = scenario('MERGED');
+    run.answers.listed.set(9, first);
+    await run.settle();
+    run.restart();
+
+    await run.settle();
+    expect(await run.poll()).toMatchObject({ details: [], delivered: [9] });
+  });
+});
+
 describe('PR index cache', () => {
   const cursor = '2026-01-01T00:00:00.000Z';
   const merged = (number: number) => ({ ...wire(number), state: 'MERGED', mergedAt: time });

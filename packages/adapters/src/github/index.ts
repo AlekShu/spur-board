@@ -99,7 +99,11 @@ export function githubSources(config: Config, options: GithubOptions): GithubSou
       const id = prSourceId(project.id, repo);
       const client = new GithubClient(options.token, options.now, options.fetch);
       const keys = projectKeyRule(project.tracker, project.link, repo);
-      // Per source: the facts of each requested PR's last full read, keyed by number.
+      // Per source: the facts of each requested or discovered PR's last full read, keyed by
+      // number. Kept in memory only. A discovered PR core does not request, also each one at the
+      // cursor tie after a restart, gets two full reads (the first without a fingerprint, the
+      // second indexed), then one index alias per poll while listed, plus a full read whenever
+      // the index shows it changed or not reusable, e.g. open with a non-green rollup.
       const cache = new Map<number, CachedPr>();
       sources.push({
         repo,
@@ -667,15 +671,25 @@ async function pollRepository({
   if (!owner || !name) throw new AdapterError('config', 'Invalid repository');
   const requested = ctx.observe.prs.filter((ref) => ref.repo.toLowerCase() === repo.toLowerCase());
   const byNumber = new Map<number, PrEntityRef>(requested.map((ref) => [ref.number, ref]));
-  const numbers = [...byNumber.keys()];
   const closing = closingSelected(keys);
-  for (const number of cache.keys()) if (!byNumber.has(number)) cache.delete(number);
   const acc = accumulator(true);
   const requests: Requests = { failed: 0, succeeded: 0, firstError: undefined };
   const request: RequestScope = { client, owner, name, signal: ctx.signal, requests };
   const discovery = await readDiscovery(request, acc, ctx, login);
   if (!discovery.ok) acc.complete = false;
   const { found } = discovery;
+  // A discovered PR core does not request joins the index once a full read cached it, and is then
+  // reused like a requested one: at the cursor tie it costs an index slot, not a full read. It is
+  // never a requested entity.
+  const numbers = [
+    ...byNumber.keys(),
+    ...found.numbers.filter((number) => !byNumber.has(number) && cache.has(number)),
+  ];
+  const fresh = found.numbers.filter((number) => !byNumber.has(number) && !cache.has(number));
+  // A failed discovery lists nothing, so it keeps the entries of the PRs it may list again.
+  for (const number of cache.keys())
+    if (!byNumber.has(number) && discovery.ok && !found.numbers.includes(number))
+      cache.delete(number);
   const entries = await readIndex(request, acc, numbers);
   // A changed feedback cursor or held history forces a full read.
   const cursorKey = (number: number): string =>
@@ -687,9 +701,9 @@ async function pollRepository({
   for (const number of numbers) {
     const facts = reusable(cache.get(number), entries.get(number), cursorKey(number), now());
     const ref = byNumber.get(number);
-    if (facts !== undefined && ref !== undefined) {
+    if (facts !== undefined) {
       acc.items.push({ kind: 'pr', facts });
-      acc.entities.push({ ref, status: 'ok' });
+      if (ref !== undefined) acc.entities.push({ ref, status: 'ok' });
       continue;
     }
     // A full read below writes a fresh entry only with this poll's fingerprint.
@@ -717,8 +731,13 @@ async function pollRepository({
       if (found.numbers.includes(number)) discoveredOk = false;
     }
   };
-  const discovered = found.numbers.filter((number) => !byNumber.has(number));
-  for (const chunk of [...chunks(changed, DETAIL_CHUNK), ...chunks(discovered, DETAIL_CHUNK)]) {
+  // Requested and discovered PRs go out in separate chunks, requested first.
+  const discovered = [...changed.filter((number) => !byNumber.has(number)), ...fresh];
+  const changedRequested = changed.filter((number) => byNumber.has(number));
+  for (const chunk of [
+    ...chunks(changedRequested, DETAIL_CHUNK),
+    ...chunks(discovered, DETAIL_CHUNK),
+  ]) {
     if (acc.budget !== undefined && acc.budget.remaining < reserveRemaining) {
       unread(chunk);
       continue;
@@ -741,14 +760,13 @@ async function pollRepository({
           if (found.numbers.includes(number)) discoveredOk = false;
           continue;
         }
-        const entry = entries.get(number);
-        if (entry !== undefined)
-          cache.set(number, {
-            fingerprint: entry.fingerprint,
-            facts,
-            cursorKey: cursorKey(number),
-            readAt: now(),
-          });
+        // Without this poll's index entry the PR is only indexed next poll, never reused.
+        cache.set(number, {
+          fingerprint: entries.get(number)?.fingerprint ?? null,
+          facts,
+          cursorKey: cursorKey(number),
+          readAt: now(),
+        });
       }
     }
   }
