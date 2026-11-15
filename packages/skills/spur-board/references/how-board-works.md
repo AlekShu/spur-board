@@ -43,6 +43,7 @@ hides its inline comments; thread resolution and the head a comment was left on
 change nothing for feedback. Bots (GitHub Apps) neither return a task, approve it nor block
 an approval; their threads still count. Handled means handed by ID to a Dev turn, not answered; in shadow
 mode, a later submit in Dev or an executor `none` column handles it.
+An edit after the hand makes it unhandled again, returning a task right of Dev.
 A status comment whose last line is a hidden `board-reviewer-progress` or
 `board-reviewer-unavailable` marker is not external feedback. No required checks: non-skipped count. `projects[].reposWithoutCi` waives absent checks
 for listed repos; never failed/skipped required ones.
@@ -78,6 +79,9 @@ A new head closes taken turns outside Dev; taken Dev turns survive pushes.
 Right of Dev, red CI, a draft, a conflict, an external comment or an unresolved
 thread where required returns the task to Dev at once, unless a turn is taken; then after its submit or return.
 The Dev turn hands the comments, beside a return's `code` block.
+Each handed entry has its `url`, `editedAt` once edited, and a review's inline
+`comments` with `url` and `threadId`. Turns of a Dev visit opened by a return
+show `returned`: who, from, the turn, the `code` block and the verbatim reason.
 
 Closed turns receive no further Board sends; Obsolete queued rings are dropped;
 a message already accepted by Spur cannot be retracted. Check `board inbox` and
