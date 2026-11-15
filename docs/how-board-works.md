@@ -22,12 +22,10 @@ inspect and submit the head or return findings without pushing.
 Facts (head, checks, reviews, comments, ticket, sessions) feed gates. The
 dispatcher has two actions: move the task and open an executor turn (at most one
 per evaluation). Turns follow unmet entry gates, actionable post-submit failures,
-rerouting or Done wrap-up. Holds and existing turns can yield neither action;
-facts need not cause handoffs.
+rerouting or Done wrap-up. Holds and existing turns can yield neither action.
 
 Moves, turns and course checks require `projects[].dispatcher.mode: on`. The
-default is `shadow`: proposed placement only, no turns, doorbells or blocks;
-submit by task key.
+default is `shadow`: proposed placement only, no turns, doorbells or blocks.
 
 Gates are cumulative: each column checks its enabled gate and those to its left. At a turn boundary, broken gates return work to the leftmost failing
 column. Taken turns hold until submit, return or a new head. Pending CI, unknown
@@ -36,13 +34,15 @@ for settled prerequisites; Dev can receive a repair turn for red CI, drafts,
 conflicts or unhandled external comments.
 
 Dev needs an open non-draft PR, passing checks, no conflict, handled external
-feedback, complete comment history and current-head submit. Non-skipped checks
-count when none are required. `projects[].reposWithoutCi` waives absent checks
-for listed repos, never failing or skipped required checks.
+feedback, complete comment history and current-head submit. Feedback excludes
+bots, approvals and `projects[].operatorGithubLogin` (agents' account), so worker
+thread replies never count; others' posts do. Non-skipped checks count when none
+are required. `projects[].reposWithoutCi` waives absent checks for listed repos,
+never failing or skipped required checks.
 
 Review and Product Review need current-head internal review marks, separate from
 External Review's external approval. QA needs a current-head submission; Ready to Merge waits for merge. Executor `none` may reuse same-head worker submissions
-from another worker column. Fixed gate rules have no configuration switch
+from other worker columns. Fixed gate rules have no configuration switch
 beyond enabled columns and the no-CI exception.
 
 A Review or Product Review mark lasts across visits on the current head. A visit
@@ -59,8 +59,8 @@ surface as operator block threads.
 A turn `T<number>` assigns a visit. Use keyed `board inbox ack <entries>`.
 Only the acknowledging session may submit or return: keyed
 `board submit <turn> <sha>` accepts the head; keyed
-`board return <turn> <reason>` sends findings to Dev. Submit after pushing. In
-shadow mode, use keyed `board submit <task> <sha>`.
+`board return <turn> <reason>` sends findings to Dev.
+In shadow mode, use keyed `board submit <task> <sha>`.
 Unseen heads answer `pending`: that submit is final; do not resubmit or raise a
 block. It confirms or returns the turn
 (`projects[].dispatcher.submitConfirmMs`).
@@ -114,9 +114,9 @@ ask the operator. An `operator` column asks the operator.
 
 A `code` block goes to the worker; a `dependency` or `external` block stays with
 its author's role. Questions escalate from column orchestrator to curator to
-operator; other blocks escalate straight to the operator. Skip your own project:
-a curator orchestrating the column escalates straight to the operator. Use keyed
-`board escalate <block>` if the addressee cannot resolve it.
+operator; other blocks escalate straight to the operator. A curator orchestrating
+the column escalates to the operator. Use keyed `board escalate <block>` if the
+addressee cannot resolve it.
 
 Taskless: all roles, operator only:
 `board project ask <project> <text> --to operator --key <key>`.
@@ -154,5 +154,4 @@ else project name and role icon (`board` for operator). Without a session,
 
 One linked PR merging does not by itself finish the task. Done follows the
 ticket: `projects[].tracker.doneStatuses` for Jira; for GitHub, the Issue must be
-closed. After merge, wait for tracker confirmation; if it settles open, work
-continues and another PR can be linked.
+closed. After merge, wait for the tracker; if it stays open, link another PR.
