@@ -37,6 +37,7 @@ import {
 } from './dispatcher.ts';
 import { dispatchCloseAfterMerge, dispatchSplitPr } from './split-pr.ts';
 import { empty } from './empty.ts';
+import { prFinality } from './pr-finality.ts';
 import {
   dispatchCiPendingAfterSubmit,
   dispatchCiRedNewHeadInProductReview,
@@ -158,6 +159,7 @@ export const SCENARIOS: readonly Scenario[] = [
   dispatchHappyPath,
   dispatchSplitPr,
   dispatchCloseAfterMerge,
+  prFinality,
   dispatchReviewLoop,
   dispatchOrchestratorRole,
   dispatchCiRedAfterSubmit,
