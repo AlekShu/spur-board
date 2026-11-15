@@ -37,6 +37,7 @@ import {
 } from './dispatcher.ts';
 import { dispatchCloseAfterMerge, dispatchSplitPr } from './split-pr.ts';
 import { empty } from './empty.ts';
+import { feedCodeHints } from './feed-code-hints.ts';
 import { prFinality } from './pr-finality.ts';
 import {
   dispatchCiPendingAfterSubmit,
@@ -109,6 +110,8 @@ export interface ScenarioFakes {
   slack: {
     outbox(): Promise<{ messages: SlackMessage[]; violations: unknown[] }>;
     click(message: number, button: string, text?: string): Promise<unknown>;
+    /** `/board <text>` from the operator in the feed channel, with the ephemeral replies. */
+    command(text: string): Promise<{ ok: true; responses: unknown[] }>;
   };
 }
 
@@ -153,6 +156,7 @@ export const SCENARIOS: readonly Scenario[] = [
   spurSourceSilent,
   sourceBlind,
   tokenApproval,
+  feedCodeHints,
   columnsBasicJira,
   workerKilledNoPrJira,
   sourceBlindJira,
@@ -345,6 +349,7 @@ export function createScenarioFakes(routes: {
   fake(body: { system: string; verb: string; args: unknown }): Promise<RouteResult>;
   slackOutbox(): Promise<RouteResult>;
   slackClick(body: { message: number; button: string; text?: string }): Promise<RouteResult>;
+  slackCommand(body: { text: string }): Promise<RouteResult>;
 }): ScenarioFakes {
   const ok = async (what: string, result: Promise<RouteResult>): Promise<unknown> => {
     const { status, body } = await result;
@@ -368,6 +373,11 @@ export function createScenarioFakes(routes: {
           'fake slack click',
           routes.slackClick({ message, button, ...(text === undefined ? {} : { text }) }),
         ),
+      command: async (text) =>
+        (await ok('fake slack command', routes.slackCommand({ text }))) as {
+          ok: true;
+          responses: unknown[];
+        },
     },
   };
 }
