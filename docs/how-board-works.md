@@ -36,9 +36,11 @@ conflicts or unhandled external comments.
 Dev needs an open non-draft PR, passing checks, no conflict, handled external
 feedback, complete comment history and current-head submit. Feedback excludes
 bots, approvals and `projects[].operatorGithubLogin` (agents' account), so worker
-thread replies never count; others' posts do. Non-skipped checks count when none
-are required. `projects[].reposWithoutCi` waives absent checks for listed repos,
-never failing or skipped required checks.
+thread replies never count; others' posts do.
+A status comment whose last line is a hidden `board-reviewer-progress` or
+`board-reviewer-unavailable` marker is not external feedback. Non-skipped checks
+count when none are required. `projects[].reposWithoutCi` waives absent checks
+for listed repos, never failing or skipped required ones.
 
 Review and Product Review need current-head internal review marks, separate from
 External Review's external approval. QA needs a current-head submission; Ready to Merge waits for merge. Executor `none` may reuse same-head worker submissions
@@ -77,9 +79,9 @@ act only on a current turn; reread after `turn_closed`.
 
 A doorbell expects action: read `board inbox` for the turn, addressed
 block, answer or follow-up. Ordinary task comments do not ring; nor does a block
-tracked by its author role ring itself. Notifications are separate from moves.
+tracked by its author role ring itself. Rings are separate from moves.
 
-Unacknowledged series normally repeat, up to three delivered rings;
+Unacknowledged series repeat, up to three delivered rings;
 acknowledgement stops them. Removal notices and quiet-turn reminders ring once.
 Busy recipients defer delivery; pending delivery or earlier rings in the Spur
 queue defer repeats. Queued rings can exhaust their waiting window.
@@ -95,8 +97,8 @@ curator questions move to operator.
 `projects[].columns[].courseCheck` defaults to 3 counted returns to Dev;
 `courseCheck: 0` disables it. `projects[].columns[].cycleLimit` defaults to 10 and
 takes priority. Executor returns, changes requested and external comments count;
-CI failures, conflicts and drafts alone do not count, nor ticket reopening or
-dispatcher mode changes.
+CI failures, conflicts and drafts alone do not count, nor reopened tickets or
+mode switches.
 
 Course checks hold work for direction.
 `projects[].columns[].courseCheckTo`: `operator`, curator or column orchestrator.
@@ -110,13 +112,12 @@ answer keeps the question, with an intervention item.
 
 A question (`needs_input`) goes to the column orchestrator, else curator, else
 operator. Routing avoids asking yourself: orchestrators ask the curator; curators
-ask the operator. An `operator` column asks the operator.
+ask the operator.
 
 A `code` block goes to the worker; a `dependency` or `external` block stays with
 its author's role. Questions escalate from column orchestrator to curator to
-operator; other blocks escalate straight to the operator. A curator orchestrating
-the column escalates to the operator. Use keyed `board escalate <block>` if the
-addressee cannot resolve it.
+operator; other blocks escalate straight to the operator. Use keyed
+`board escalate <block>` if the addressee cannot resolve it.
 
 Taskless: all roles, operator only:
 `board project ask <project> <text> --to operator --key <key>`.
@@ -154,4 +155,4 @@ else project name and role icon (`board` for operator). Without a session,
 
 One linked PR merging does not by itself finish the task. Done follows the
 ticket: `projects[].tracker.doneStatuses` for Jira; for GitHub, the Issue must be
-closed. After merge, wait for the tracker; if it stays open, link another PR.
+closed. If it stays open after merge, link another PR.
