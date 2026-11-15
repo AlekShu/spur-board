@@ -16,9 +16,11 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { messageRefSchema } from '@spur-board/contracts';
+import { configSchema, prSourceId, type PrFacts } from '@spur-board/contracts';
 import { Kysely, SqliteDialect, type CompiledQuery } from 'kysely';
 import { afterEach, describe, expect, it } from 'vitest';
 import { advanceConversationCursor } from '../../src/app/conversations.ts';
+import { reconcileTaskPrs } from '../../src/app/pr-associations.ts';
 import type { Tables } from '../../src/index.ts';
 import {
   KEEP_BACKUPS,
@@ -82,6 +84,11 @@ const INDEXES: Record<string, { table: string; columns: string[]; partialUnique:
   operator_item_active: {
     table: 'operator_item',
     columns: ['item_key', 'cleared_at'],
+    partialUnique: false,
+  },
+  pr_ticket_key_lookup: {
+    table: 'pr_ticket_key',
+    columns: ['ticket_key', 'source'],
     partialUnique: false,
   },
   operator_token_status_expiry: {
@@ -271,6 +278,179 @@ describe('migrate', () => {
         'SEARCH comment USING INDEX comment_conversation_message (conversation_ref=? AND message_ref=?)',
       ]);
     }
+  });
+
+  it('looks up retained PRs by task key through pr_ticket_key', async () => {
+    const { raw, db } = rawDb(join(tempDir(), 'board.db'));
+    migrate(raw, real);
+    const config = configSchema.parse({
+      projects: [
+        {
+          id: 'proj',
+          tracker: { type: 'github-issues', repo: 'x/y', label: 'board' },
+          repos: ['x/y'],
+          operatorGithubLogin: 'operator',
+        },
+      ],
+      operator: { slack: 'operator' },
+      digest: { tz: 'UTC' },
+    });
+    const source = prSourceId('proj', 'x/y');
+    const facts = (number: number, ticketKeys: string[]): PrFacts => ({
+      repo: 'x/y',
+      number,
+      url: `https://github.com/x/y/pull/${String(number)}`,
+      title: 'work',
+      author: 'worker',
+      headSha: 'a'.repeat(40),
+      headBranch: 'feature',
+      state: 'merged',
+      draft: false,
+      mergeable: 'unknown',
+      mergeState: 'unknown',
+      requiredChecks: [],
+      checks: [],
+      reviews: [],
+      reviewThreads: [],
+      reviewRequests: [],
+      ticketKeys,
+      updatedAt: sampleRows.task.created_at,
+    });
+    const taskId = 1;
+    await db
+      .insertInto('task')
+      .values({ ...sampleRows.task, id: taskId })
+      .execute();
+    for (const [number, key] of [
+      [7, sampleRows.task.key],
+      [8, 'o/r#999'],
+    ] as const) {
+      await db
+        .insertInto('pr_snapshot')
+        .values({
+          ...sampleRows.pr_snapshot,
+          number,
+          state: 'merged',
+          detail: JSON.stringify(facts(number, [key])),
+          source,
+        })
+        .execute();
+      await db
+        .insertInto('pr_ticket_key')
+        .values({ repo: 'x/y', number, source, ticket_key: key })
+        .execute();
+    }
+    const queries: CompiledQuery[] = [];
+    const logged = new Kysely<Tables>({
+      dialect: new SqliteDialect({ database: raw }),
+      log: (event) => {
+        if (event.level === 'query') queries.push(event.query);
+      },
+    });
+    cleanup.push(() => logged.destroy());
+
+    await reconcileTaskPrs(logged, config, taskId, sampleRows.task.created_at);
+
+    expect(queries.map((q) => q.sql)).not.toContain('select * from "pr_snapshot"');
+    const lookup = queries.find((q) => q.sql.includes('"pr_ticket_key"'));
+    expect(lookup).toBeDefined();
+    const plan = raw
+      .prepare<unknown[], { detail: string }>(`EXPLAIN QUERY PLAN ${lookup?.sql ?? ''}`)
+      .all(...(lookup?.parameters ?? []))
+      .map((step) => step.detail);
+    expect(
+      plan.filter((step) => step.startsWith('SCAN')),
+      plan.join('\n'),
+    ).toEqual([]);
+    expect(plan).toContainEqual(
+      expect.stringMatching(
+        /^SEARCH .*USING (COVERING )?INDEX pr_ticket_key_lookup \(ticket_key=\? AND source=\?\)/,
+      ),
+    );
+    expect(plan).toContainEqual(
+      expect.stringMatching(
+        /^SEARCH .*USING INDEX sqlite_autoindex_pr_snapshot_1 \(repo=\? AND number=\?\)/,
+      ),
+    );
+    expect(await db.selectFrom('link').select(['task_id', 'repo', 'number']).execute()).toEqual([
+      { task_id: taskId, repo: 'x/y', number: 7 },
+    ]);
+  });
+
+  it('backfills pr_ticket_key from snapshot and per-source polling keys', () => {
+    const { raw } = rawDb(join(tempDir(), 'board.db'));
+    migrate(raw, real.slice(0, 21));
+    const snapshot = (repo: string, number: number, source: string, detail: string) => {
+      insertRaw(raw, 'pr_snapshot', { ...sampleRows.pr_snapshot, repo, number, source, detail });
+    };
+    snapshot('O/R', 7, 'github:web:o/r', '{"ticketKeys":["WEBDEV-1","WEBDEV-1"]}');
+    snapshot('o/r', 9, 'github:board:o/r', '{"ticketKeys":[1,"o/r#9"]}');
+    snapshot('o/r', 8, 'github:board:o/r', 'not json');
+    const polling = JSON.stringify({
+      state: 'merged',
+      headSha: 'a'.repeat(40),
+      recheckAt: null,
+      ticketKeys: ['o/r#9'],
+    });
+    insertRaw(raw, 'meta', { key: 'pr-poll:github:board:o/r:pr:o/r#7', value: polling });
+    insertRaw(raw, 'meta', { key: 'pr-poll:github:board:o/r:pr:o/r#8', value: 'garbage' });
+    snapshot('My-Org/a_b.c-d', 12, 'github:web:my-org/a_b.c-d', '{}');
+    const keys = (ticketKeys: string[]) => JSON.stringify({ ticketKeys });
+    for (const [key, ticketKey] of [
+      ['pr-poll:github:a:b:my-org/a_b.c-d:pr:my-org/a_b.c-d#12', 'K-1'],
+      ['pr-poll:github:x:o/r:pr:o/r#09', 'leading-zero'],
+      ['pr-poll:github:x:o/r:xx:o/r#9', 'no-pr-segment'],
+      ['pr-poll::pr:o/r#9', 'empty-source'],
+      ['pr-poll:github:x:o/r:pr:o/r#', 'no-number'],
+      ['pr-poll:github:x:o/r:pr:o/r9', 'no-hash'],
+    ] as const) {
+      insertRaw(raw, 'meta', { key, value: keys([ticketKey]) });
+    }
+
+    migrate(raw, real);
+
+    expect(
+      raw.prepare('SELECT * FROM pr_ticket_key ORDER BY repo, number, source, ticket_key').all(),
+    ).toEqual([
+      {
+        repo: 'My-Org/a_b.c-d',
+        number: 12,
+        source: 'github:a:b:my-org/a_b.c-d',
+        ticket_key: 'K-1',
+      },
+      { repo: 'O/R', number: 7, source: 'github:board:o/r', ticket_key: 'o/r#9' },
+      { repo: 'O/R', number: 7, source: 'github:web:o/r', ticket_key: 'WEBDEV-1' },
+      { repo: 'o/r', number: 9, source: 'github:board:o/r', ticket_key: 'o/r#9' },
+    ]);
+    expect(raw.pragma('foreign_key_check')).toEqual([]);
+    expect(
+      raw.prepare("SELECT name FROM sqlite_master WHERE name = 'pr_snapshot_lower_identity'").all(),
+    ).toEqual([]);
+  });
+
+  it('joins parsed polling keys to pr_snapshot through an index in the pr_ticket_key backfill', () => {
+    const { raw } = rawDb(join(tempDir(), 'board.db'));
+    migrate(raw, real.slice(0, 21));
+    const sql = real[21]?.sql ?? '';
+    const start = sql.indexOf('CREATE INDEX pr_snapshot_lower_identity');
+    const end = sql.indexOf('DROP INDEX pr_snapshot_lower_identity');
+    const [createIndex = '', backfill = ''] = sql.slice(start, end).split(';');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    raw.exec(sql.slice(0, sql.indexOf('INSERT OR IGNORE')));
+    raw.exec(`${createIndex};`);
+
+    const plan = raw
+      .prepare<unknown[], { detail: string }>(`EXPLAIN QUERY PLAN ${backfill}`)
+      .all()
+      .map((step) => step.detail);
+
+    expect(plan).toContainEqual(
+      expect.stringMatching(
+        /^SEARCH s USING INDEX pr_snapshot_lower_identity \(<expr>=\? AND number=\?\)/,
+      ),
+    );
+    expect(plan.filter((step) => /^SCAN (s|pr_snapshot)\b/.test(step))).toEqual([]);
   });
 
   it('keeps rows written at N-1 when migrating to N', async () => {
@@ -966,6 +1146,10 @@ describe('migration pins', () => {
       'e3fd7107df695a14678a4a8c2a47678996a7e62bf54c884987fb12c9cd3f2a33',
     '0021_submission_pending.sql':
       '20a8c5ae40faa72dd3e58b2dd99ad1b3cea6035cdc8a63c3f18708483fd42cc7',
+    '0022_pr_ticket_key.sql': [
+      '3fcbc414d17b541af259532a21ea7f0c',
+      '0c9118e6801ec43095111b36d3547385',
+    ].join(''),
   };
 
   interface MigrationFile {
