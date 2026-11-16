@@ -181,6 +181,30 @@ describe('web design assets and policy', () => {
         expect(rule).toContain('background: var(--color-row-hover);');
     },
   );
+  it('Modal insets its header actions by one ring so a stretched tab ring stays on screen', () => {
+    const css = read('src/ds/Modal/Modal.module.css');
+    const rule = css.split('\n.actions {')[1]?.split('}')[0];
+    expect(rule).toBeDefined();
+    expect(rule).toContain('padding-top: calc(var(--width-ring) + var(--offset-ring));');
+  });
+  it('a layer body keeps its outward ring inside the surface and its content in place', () => {
+    const one = 'calc(var(--width-ring) + var(--offset-ring))';
+    const rules = (file: string) =>
+      cssRules(read(file))
+        .filter(({ selector }) => selector === '.body')
+        .map(({ body }) => body.replace(/\s+/g, ' '));
+    expect(rules('src/ds/Scrim/Scrim.module.css')).toEqual([
+      expect.stringContaining(`margin: 0 ${one} ${one};`),
+    ]);
+    const less = (space: string) => `calc(var(${space}) - var(--width-ring) - var(--offset-ring))`;
+    expect(rules('src/ds/Modal/Modal.module.css')).toEqual([
+      expect.stringContaining(`padding: ${one} ${less('--space-4')} ${less('--space-4')};`),
+      expect.stringContaining(`padding: ${one} ${less('--space-3')} ${less('--space-3')};`),
+    ]);
+    expect(rules('src/ds/SidePanel/SidePanel.module.css')).toEqual([
+      expect.stringContaining(`padding: var(--space-4) ${less('--space-4')} ${less('--space-4')};`),
+    ]);
+  });
   it('ThemeSwitch lifts a focused item so the next item cannot cover its ring', () => {
     const lifts = cssRules(read('src/ds/ThemeSwitch/ThemeSwitch.module.css')).filter(
       ({ selector, body }) =>
@@ -269,6 +293,8 @@ describe('web design assets and policy', () => {
       'FocusRing',
       'HoverMenu',
       'IconButton',
+      'Modal',
+      'SidePanel',
       'Tabs',
       'TextArea',
       'TextInput',

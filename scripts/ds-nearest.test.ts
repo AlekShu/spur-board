@@ -91,10 +91,10 @@ describe('nearest size', () => {
     expect(out.at(-1)).toBe('verdict: in --text-body, --text-lead, --space-3, --size-icon');
   });
 
-  it('puts 30px out against --size-section-header at 2px', () => {
+  it('puts 30px out against the 32px and 28px tokens at 2px', () => {
     const out = lines(['30px']);
     expect(line(out, 'dark')).toBe(
-      'dark  30px: --size-section-header 32px, --size-control 28px - Δ 2px - out',
+      'dark  30px: --space-8 32px, --size-section-header 32px, --size-control 28px - Δ 2px - out',
     );
     expect(out.at(-1)).toBe('verdict: out');
   });

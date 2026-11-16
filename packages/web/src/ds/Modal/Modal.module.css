@@ -1,0 +1,57 @@
+.root {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+}
+/* Centred with a side gutter: left and right hold the gutter, auto margins centre the
+   capped width. */
+.surface {
+  position: absolute;
+  top: var(--space-8);
+  bottom: var(--space-8);
+  left: var(--space-6);
+  right: var(--space-6);
+  max-width: var(--size-modal);
+  margin-inline: auto;
+  border: var(--size-hairline) solid var(--color-border-strong);
+}
+.header {
+  height: var(--size-modal-header);
+  padding: 0 var(--space-4);
+  gap: var(--space-3);
+}
+/* A tab stretched to the header starts one ring below the surface edge, so its outward ring
+   stays on screen when the modal sits at the top of the viewport; its underline still meets
+   the header border. Title and Close stay centred in the full header. */
+.actions {
+  padding-top: calc(var(--width-ring) + var(--offset-ring));
+}
+/* The top padding keeps the ring of the first focusable child inside the scrolling body; the
+   sides and bottom give back the body's ring margin. */
+.body {
+  padding: calc(var(--width-ring) + var(--offset-ring))
+    calc(var(--space-4) - var(--width-ring) - var(--offset-ring))
+    calc(var(--space-4) - var(--width-ring) - var(--offset-ring));
+}
+.body:focus-visible {
+  outline: var(--width-ring) solid var(--color-status-working);
+  outline-offset: var(--offset-ring);
+}
+
+/* breakpoints.narrow */
+@media (max-width: 760px) {
+  .surface {
+    inset: 0;
+    max-width: none;
+    border: 0;
+  }
+  .header {
+    padding: 0 var(--space-3);
+    gap: var(--space-2);
+  }
+  .body {
+    padding: calc(var(--width-ring) + var(--offset-ring))
+      calc(var(--space-3) - var(--width-ring) - var(--offset-ring))
+      calc(var(--space-3) - var(--width-ring) - var(--offset-ring));
+  }
+}
