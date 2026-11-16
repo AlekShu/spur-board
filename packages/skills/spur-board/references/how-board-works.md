@@ -31,3 +31,19 @@ URLs (also before observation), and effective session IDs. Banned links are excl
 session navigation. This replaces the former detail-only association array; use `board task PROJ-123`
 for the detailed association list. `board status --detail` adds full ticket, PR and session facts.
 The catalog version changes with these contracts; restart the daemon and live MCP sessions together.
+
+## Browser access
+
+With `web.port` and `web.publicOrigin` configured, a second loopback listener serves browser
+assets, health and catalog operations whose `web` binding is enabled. It uses the same registry,
+authorization, idempotency and operation hooks as the agent API, with the operator caller.
+Effective project configuration is available through `config.get`.
+Only `comment.add` and `block.answer` are enabled writes. Token and skill routes stay on the
+agent API. The web listener is off by default and a failed bind does not stop the agent API.
+
+A private-network proxy must preserve Host. Exact Origin, Host, JSON and fetch-metadata checks
+reject foreign browser pages; anyone with network or local access can still act as operator.
+Logs include the web channel and untrusted forwarded client/user-agent metadata. Web writes
+persist `via: web` in the journal; history returns `actor: operator` with `via: web`, allowing
+clients to show `operator (web)`.
+Missing UI assets return a 503 build hint while health and operations remain available.
