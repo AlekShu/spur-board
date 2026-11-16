@@ -75,7 +75,8 @@
   --tracking-bar: 0.08em;
   --weight-bold: 700;
 
-  /* spacing, 4px step; 1-5 and 2-5 are half steps */
+  /* spacing, 4px step; 0-25 is a quarter step, 1-5 and 2-5 are half steps */
+  --space-0-25: 1px;
   --space-1: 4px;
   --space-1-5: 6px;
   --space-2: 8px;
@@ -86,12 +87,14 @@
 
   /* sizes */
   --size-header: 42px;
+  --size-section-header: 32px;
   --size-statusbar: 24px;
   --size-control: 28px;
   --size-icon-button: 24px;
   --size-icon: 12px;
   --size-logo: 20px;
   --size-dot: 6px;
+  --size-chevron: 16px;
   --size-column: 248px;
   --size-hairline: 1px;
   --size-meter: 60px;
@@ -103,6 +106,12 @@
   --width-ring: 1px;
   --offset-ring: 1px;
   --opacity-disabled: 0.4;
+
+  /* transforms */
+  --rotate-collapsed: -90deg;
+
+  /* stacking */
+  --z-sticky: 1;
 
   --radius: 0;
 }

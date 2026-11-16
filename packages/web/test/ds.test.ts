@@ -75,6 +75,7 @@ describe('design system examples rule', () => {
       folders: [
         'Button',
         'Chip',
+        'CollapsibleSection',
         'FormRow',
         'Icon',
         'IconButton',
@@ -83,6 +84,7 @@ describe('design system examples rule', () => {
         'Meter',
         'Quiet',
         'StatusDot',
+        'Tabs',
         'TextArea',
         'TextInput',
         'ThemeSwitch',
