@@ -5,6 +5,10 @@ dummy secrets, fake Slack, Spur and GitHub APIs, a network guard and a control e
 talks to a real service and is removed by `pnpm stand down`. `pnpm stand help` lists every
 command.
 
+Every stand needs a readable, valid live board `config.yaml`: `pnpm stand` finds it through
+`BOARD_HOME`, else `XDG_CONFIG_HOME` (default `~/.config`), checks its ports against it, and
+refuses with `live_config` when it is missing, unreadable or invalid.
+
 Agents read the skills `qa-stand`, `qa-seed` and `qa-report` before a QA round.
 
 ## Driving pnpm stand mcp from a shell
@@ -47,19 +51,27 @@ projects:
     defaultBranch: main
     sidecars:
       board-stand:
-        command: env -u <NAME> -u <OTHER_NAME> pnpm stand up --foreground --port $STAND_PORT
+        command: env -u <NAME> -u <OTHER_NAME> pnpm stand up --foreground --port $STAND_PORT --web-port $STAND_WEB_PORT
         autoStart: false
         ports:
           stand:
             env: STAND_PORT
             start: 4780
             end: 4799
+          web:
+            env: STAND_WEB_PORT
+            start: 4780
+            end: 4799
 ```
 
 - `env -u` unsets each variable the `external_secrets` refusal names; list the real credential
   variables of your environment there.
-- The port range is the stand's own (4780-4799). The sidecar process is the stand's parent, so
-  no `--watch-pid` is needed.
+- Both port ranges must equal the live board's `stand.portRange` (4780-4799 when it is omitted):
+  the guard reads the live config and refuses a port outside that range with `port_range`. Each
+  stand takes two ports, so the default band holds 10 stands.
+- Drop `--web-port $STAND_WEB_PORT` and the `web` port when the live `web.publicOrigin` has no
+  `{port}`: the guard refuses a web port then (`web_origin`).
+- The sidecar process is the stand's parent, so no `--watch-pid` is needed.
 - Start it on demand: `spur sidecar start --session <id> --name board-stand`.
 - Stop it with `pnpm stand down`, then `spur sidecar stop --session <id> --name board-stand`.
   `down` stops the stand and removes its home; the sidecar reports its port
@@ -74,3 +86,17 @@ projects:
 - An errored session leaves its sidecars disabled while the agent keeps working: run
   `pnpm stand status` after a session is restored, and start the sidecar again if no stand
   answers.
+
+## Browser QA
+
+A stand serves the web UI from `packages/web/dist` of the checkout it runs from.
+
+- Build the UI from the tested checkout first: `pnpm --filter @spur-board/web build`. Without
+  it, `/` answers 503 `UI is not built`.
+- The stand reads the UI files when it starts: after a rebuild, run `pnpm stand reset`.
+- `pnpm stand up` prints `webUrl` when the live board's `web.publicOrigin` has `{port}`, e.g.
+  `https://{port}.<domain>`. The stand fills `{port}` with its own web port from the live
+  `stand.portRange`: the first free one, or the next free one when a concurrent stand binds it
+  first. A `--web-port` you pass is never moved: when it is taken, `up` fails. Without such a
+  template `up` says so on stderr and the stand runs API-only.
+- Open only that `webUrl` in the browser; never the live board's web address.
