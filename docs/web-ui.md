@@ -13,8 +13,9 @@ make sure the UI assets are built, then open `web.publicOrigin` in a browser. A 
 the UI is not built means the assets are missing; see
 [Building the web UI](https://github.com/AnDeVerin/spur-board/blob/main/SETUP.md#building-the-web-ui).
 
-The UI reads `config.get`, `status.get` for the chosen project, `inbox.operator`, and the
-`/v1/events` stream on the same listener. It holds no data of its own.
+The UI reads `config.get`, `status.get` for the chosen project, `inbox.operator`, `task.get`
+for the open task, and the `/v1/events` stream on the same listener. It holds no data of its
+own.
 
 ## What it shows
 
@@ -42,8 +43,8 @@ Below the header come the columns of the chosen project, in configuration order:
 - A column with no tasks collapses to a narrow spine with its name and `0`.
 - The `done` column lists every done task in a compact scrolling list.
 - A card shows the short key and the ticket title, or the key alone when there is no ticket.
-  Hovering shows the full key. A card is a link: a click or Enter sets the address to
-  `?open=<task key>`, and a modified click opens a new tab. This version has no task panel yet.
+  Hovering shows the full key. A click or Enter opens the task view; a modified click opens a
+  new tab.
 - A task whose column the project's configuration does not list is not shown.
 
 On a narrow screen the columns scroll sideways, and the mode and the filter are hidden.
@@ -98,6 +99,12 @@ pointer only (Tab stays in the panel). On a narrow screen the panel covers the b
 Escape closes it. Opening and closing each add a history entry, so Back after a close reopens
 the panel.
 
+## Task view
+
+A card or `?open=<task key>` opens the task view: the task's links and **Why it is here**, the
+conditions, holds, turn and blocks that keep it in its column. See the
+[task view](web-ui-task-view.md) guide.
+
 ## Live and stale states
 
 Times on the screen are UTC, written `hh:mm dd/mm/yy`.
@@ -116,7 +123,8 @@ Times on the screen are UTC, written `hh:mm dd/mm/yy`.
   trying to reconnect.
 - **Daemon down**: a configuration or status read failed. The error banner says the daemon does
   not answer, gives the time of the data on screen and warns that answers and comments cannot be
-  sent. The daemon button in the status bar turns red and the other services read `unknown`. On the first load there is no data, so the banner says so and no columns show.
+  sent. The daemon button turns red. On the first load there is no data, so the banner says so
+  and no columns show.
 - **Source blind**: a warning banner names a source of the project that has stopped answering
   and the time of its last complete poll, such as Spur not answering since 14:40 15/11/26.
   Several such sources share one banner. A source that is still warming up is not named.
