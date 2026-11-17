@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
 import { request } from 'node:http';
@@ -58,6 +58,24 @@ let checked: StandManifest | undefined;
 
 const DRIFT_URL = 'http://spur.stand.invalid/drift';
 const CLI = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
+const CHECKOUT = fileURLToPath(new URL('../../../', import.meta.url));
+
+function expectedVersion(): string {
+  try {
+    return (
+      execFileSync('git', ['describe', '--tags', '--abbrev=0', '--match', 'v*'], {
+        cwd: CHECKOUT,
+        env: { PATH: process.env['PATH'] ?? '' },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+        .trim()
+        .replace(/^v/, '') || 'dev'
+    );
+  } catch {
+    return 'dev';
+  }
+}
 
 beforeEach(() => {
   base = mkdtempSync(join(tmpdir(), 'stand-it-'));
@@ -422,12 +440,13 @@ async function waitForSendRequest(manifest: StandManifest, session: string): Pro
 function standCli(
   args: string[],
   extra: Record<string, string> = {},
+  cwd?: string,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     execFile(
       process.execPath,
       [CLI, ...args],
-      { env: { ...extra, PATH: process.env['PATH'] ?? '', HOME: osHome, TMPDIR: root } },
+      { cwd, env: { ...extra, PATH: process.env['PATH'] ?? '', HOME: osHome, TMPDIR: root } },
       (error, stdout, stderr) => {
         resolve({ code: error === null ? 0 : Number(error.code ?? -1), stdout, stderr });
       },
@@ -597,7 +616,9 @@ async function askQuestion(manifest: StandManifest): Promise<OutboxMessage> {
   });
   expect(code, stderr).toBe(0);
   await waitFor(manifest, 'outbox-drained');
-  const [message] = (await outbox(manifest)).messages;
+  const message = (await outbox(manifest)).messages.find((posted) =>
+    posted.text.includes('Which version?'),
+  );
   if (message === undefined) throw new Error('the question was not posted');
   return message;
 }
@@ -1028,6 +1049,28 @@ describe('stand', () => {
       'https://spur.stand.invalid',
     );
     expect((await fetch(`${manifest.daemonUrl}/v1/schema`)).status).toBe(200);
+    const status = await operatorStatus(manifest);
+    expect(status.code, status.stderr).toBe(0);
+    const parsed = statusOutputSchema.parse(JSON.parse(status.stdout));
+    expect(parsed.daemon.version).toBe(expectedVersion());
+  }, 60_000);
+
+  it('reports the checkout release when launched from an unrelated directory', async () => {
+    const started = await standCli(['up', '--port', '0'], {}, base);
+    expect(started.code, started.stderr).toBe(0);
+    const { home } = JSON.parse(started.stdout) as { home: string };
+    try {
+      const manifest = readManifest(home);
+      if (manifest === undefined) throw new Error('the stand wrote no manifest');
+      const status = await operatorStatus(manifest);
+      expect(status.code, status.stderr).toBe(0);
+      expect(statusOutputSchema.parse(JSON.parse(status.stdout)).daemon.version).toBe(
+        expectedVersion(),
+      );
+    } finally {
+      const stopped = await standCli(['down', '--home', home]);
+      expect(stopped.code, stopped.stderr).toBe(0);
+    }
   }, 60_000);
 
   it('leaves no source blind', async () => {
@@ -1103,7 +1146,11 @@ describe('stand', () => {
     expect(await fingerprint(after)).toEqual(fresh);
     expectPrivateDatabase(after.home);
     expect(await instance(after)).not.toBe(before);
-    expect((await operatorStatus(after)).code).toBe(0);
+    const status = await operatorStatus(after);
+    expect(status.code, status.stderr).toBe(0);
+    expect(statusOutputSchema.parse(JSON.parse(status.stdout)).daemon.version).toBe(
+      expectedVersion(),
+    );
   }, 60_000);
 
   it('gives each stand its own random role sessions and keeps them across reset', async () => {
@@ -1284,7 +1331,13 @@ describe('stand', () => {
     if (current === undefined) throw new Error('stand stopped');
     const after = current.manifest();
     expect(slackUrl(after)).toBe(url);
-    expect(await outbox(after)).toEqual({ messages: [], violations: [] });
+    await waitFor(after, 'outbox-drained');
+    const restored = await outbox(after);
+    expect(restored.violations).toEqual([]);
+    expect(restored.messages).toHaveLength(1);
+    expect(restored.messages[0]?.text).toBe(
+      'spur-board\n\n> spur-board is live: 0 tasks, 0 for you',
+    );
 
     const message = await requestToken(after, 'after');
     const close = button(message, /^item:\d+:close$/);
@@ -1415,7 +1468,7 @@ describe('stand', () => {
 
   it('runs fake slack outbox and click through the real CLI', async () => {
     const manifest = await up();
-    await askQuestion(manifest);
+    const question = await askQuestion(manifest);
 
     const listed = await standCli(['fake', 'slack', 'outbox', '--home', manifest.home]);
     expect(listed.code, listed.stderr).toBe(0);
@@ -1425,7 +1478,7 @@ describe('stand', () => {
       'fake',
       'slack',
       'click',
-      '1',
+      String(question.n),
       'answer',
       '--text',
       'Use v2.',

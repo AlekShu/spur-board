@@ -75,6 +75,7 @@ import {
 } from './scenarios/index.ts';
 import { STAND_SPUR_PROJECTS } from './scenarios/helpers.ts';
 import { privateDir, restoreSnapshot, saveSnapshot, snapshotKey } from './snapshots.ts';
+import { standVersion } from './version.ts';
 
 export { StandRefusedError } from './guards.ts';
 
@@ -720,6 +721,7 @@ export async function startStand(options: StandOptions): Promise<Stand> {
       stdout: { write: log },
       writeErr: log,
       ports: {
+        productVersion: standVersion(fileURLToPath(new URL('../../../', import.meta.url))),
         startAdapters: runner.start,
         sessionFetcher: standFetch,
         spur: createSpurPort({ baseUrl: spurBaseUrl, fetch: standFetch }),
