@@ -1,6 +1,7 @@
 # Web UI
 
-The browser reads one project's columns, tasks and freshness. Writes stay in CLI, MCP tools and Slack.
+View the Board and freshness, answer open operator questions and add comments. Archived tasks
+are read-only; other actions use CLI, MCP or Slack.
 
 ## Opening it
 
@@ -105,8 +106,8 @@ Narrow panels cover the bar. Opening and closing add history entries; Back after
 
 ## Task view
 
-A card or `?open=<task key>` opens the task view: links, **Why it is here** and **History**
-(journal events with the actor's channel, as `operator (web)`). See the
+A card or `?open=<task key>` opens links, **Why it is here**, **Blocks**, **Comments** and
+**History** (journal events with channel, e.g. `operator (web)`). See the
 [task view](web-ui-task-view.md) guide.
 
 ## Live and stale states
