@@ -232,7 +232,8 @@ describe('CLI against the real HTTP API', () => {
             project: id.startsWith('cur-') ? 'cur' : 'web',
             status: 'running',
           }),
-        verifyToken: () => Promise.resolve(null),
+        verifyToken: (token) =>
+          Promise.resolve(token === 'operator-token' ? { name: 'cli-test' } : null),
         registry: createOperationRegistry({ config, clock, completeSince: new Map() }),
         logRequest: () => {},
       });
@@ -293,10 +294,37 @@ describe('CLI against the real HTTP API', () => {
         { kind: 'block', role: 'curator' },
         { kind: 'answer', role: 'worker' },
       ]);
-      // CLI, MCP and agent writes reach the same HTTP API and record no `via`.
+
+      const followed = capture();
+      expect(
+        await runCli(['followup', 'B1', 'Also check v3.', '--json'], {
+          clientConfig: { ...clientConfig('unused'), session: undefined, token: 'operator-token' },
+          io: followed.io,
+        }),
+      ).toBe(0);
+      const followUp = JSON.parse(followed.stdout) as { comment: { id: string } };
+      expect(followUp).toMatchObject({ comment: { block: 'B1', author: 'operator' } });
+      expect(await store.db.selectFrom('notification').select(['kind', 'role']).execute()).toEqual([
+        { kind: 'block', role: 'curator' },
+        { kind: 'answer', role: 'worker' },
+        { kind: 'answer', role: 'worker' },
+      ]);
+      const workerInbox = capture();
+      expect(
+        await runCli(['inbox', '--json'], {
+          clientConfig: clientConfig('worker-1'),
+          io: workerInbox.io,
+        }),
+      ).toBe(0);
+      expect(
+        (JSON.parse(workerInbox.stdout) as { comments: { id: string }[] }).comments.map(
+          (comment) => comment.id,
+        ),
+      ).toContain(followUp.comment.id);
+      // Every write here came through the board CLI, which reports its write path to the agent API.
       const vias = await store.db.selectFrom('event').select('via').execute();
       expect(vias.length).toBeGreaterThan(1);
-      expect(vias.map((event) => event.via)).toEqual(vias.map(() => null));
+      expect(vias.map((event) => event.via)).toEqual(vias.map(() => 'cli'));
     } finally {
       try {
         await app?.close();

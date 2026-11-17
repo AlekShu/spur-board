@@ -74,6 +74,7 @@ const SERVER_EXITS = {
   not_found: { exit: 1, code: 'not_found' },
   not_implemented: { exit: 1, code: 'not_implemented' },
   block_not_open: { exit: 1, code: 'block_not_open' },
+  block_still_open: { exit: 1, code: 'block_still_open' },
   wrong_block_type: { exit: 1, code: 'wrong_block_type' },
   stale_comment_revision: { exit: 1, code: 'stale_comment_revision' },
   turn_closed: { exit: 1, code: 'turn_closed' },
@@ -533,6 +534,7 @@ describe('CLI exit classes and mutation keys', () => {
       key: string;
       session: string | undefined;
       authorization: string | undefined;
+      via: string | string[] | undefined;
     }[] = [];
     const { url } = await fakeServer((request, response) => {
       requests += 1;
@@ -545,6 +547,7 @@ describe('CLI exit classes and mutation keys', () => {
           key: body.key,
           session: request.headers['x-board-session'] as string | undefined,
           authorization: request.headers.authorization,
+          via: request.headers['x-board-via'],
         });
         response.writeHead(200, { 'content-type': 'application/json' });
         response.end(
@@ -582,9 +585,11 @@ describe('CLI exit classes and mutation keys', () => {
       key: 'ask-1',
       session: 'test-session',
       authorization: undefined,
+      via: 'cli',
     });
     expect(received[1]?.key).toMatch(/^[0-9a-f-]{36}$/);
     expect(received[1]?.authorization).toBe('Bearer token');
+    expect(received[1]?.via).toBe('cli');
     const operatorRequest = received[1];
     if (!operatorRequest) throw new Error('Expected operator request.');
     expect(operator.stderr).toContain(`key: ${operatorRequest.key}`);
@@ -611,6 +616,7 @@ describe('CLI exit classes and mutation keys', () => {
       key: agentRequest.key,
       session: 'test-session',
       authorization: undefined,
+      via: 'cli',
     });
     expect(missing.stderr).toContain(`key: ${agentRequest.key}`);
   });

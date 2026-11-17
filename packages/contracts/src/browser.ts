@@ -282,6 +282,11 @@ export const blockAnswerOutputSchema = z.strictObject({
   comment: commentSchema,
 });
 
+export const blockFollowupInputSchema = z.strictObject({
+  block: blockIdSchema,
+  text: text('The follow-up.', TEXT_MAX),
+});
+
 export const configGetInputSchema = z.strictObject({ project });
 
 export const inboxOperatorInputSchema = z.strictObject({});
@@ -342,7 +347,7 @@ const taskHistoryEventSchema = z
       .enum(VIAS)
       .optional()
       .describe(
-        'Channel the write arrived through, web or slack, whoever the actor; absent for CLI, MCP, agent and scheduled writes.',
+        'Channel the write arrived through, whoever the actor: web or slack, or cli or mcp as the board client reported it; absent for scheduled and board writes and older clients.',
       ),
     summary: z.string().describe('What happened, in one line.'),
   })
@@ -410,5 +415,11 @@ export const browserOperations = {
     kind: 'mutation',
     input: blockAnswerInputSchema,
     output: blockAnswerOutputSchema,
+  },
+  'block.followup': {
+    id: 'block.followup',
+    kind: 'mutation',
+    input: blockFollowupInputSchema,
+    output: commentAddOutputSchema,
   },
 } as const;
