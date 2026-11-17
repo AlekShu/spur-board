@@ -209,14 +209,16 @@ describe('product skill sync', () => {
   it('keeps the skill and bounded references equal to fresh generation', () => {
     expect(replaceGeneratedSection(skill)).toBe(skill);
     expect(Buffer.byteLength(skill)).toBeLessThanOrEqual(5120);
-    expect(references.map((r) => r.fileName)).toEqual(['commands.md', 'config.md', 'errors.md']);
-    expect(references[0]?.content).toContain('[errors.md](errors.md)');
+    const pages = ['tasks.md', 'blocks.md', 'config.md', 'errors.md'];
+    expect(references.map((r) => r.fileName)).toEqual(pages);
+    for (const page of references.slice(0, 2))
+      expect(page.content).toContain('[errors.md](errors.md)');
     expect(readdirSync(refsPath).sort()).toEqual(
       [...references.map((reference) => reference.fileName), ...guideNames].sort(),
     );
     for (const [index, reference] of references.entries()) {
       expect(referenceTexts[index]).toBe(reference.content);
-      expect(Buffer.byteLength(reference.content)).toBeLessThan(8192);
+      expect(Buffer.byteLength(reference.content)).toBeLessThanOrEqual(6553); // 80% of 8192
     }
   });
 
@@ -250,13 +252,12 @@ describe('product skill sync', () => {
   it.each(['worker', 'orchestrator'] as const)('indexes exactly the %s grants', (role) => {
     const section = roleSection(role);
     const expected = OPERATIONS.filter((operation) => roleCanUseOperation(operation, role));
-    expect(
-      [...section.matchAll(/^- \[`board ([^`]+)`\]\(references\//gm)].map((match) => match[1]),
-    ).toEqual(expected.map((operation) => operation.cli.command));
-    for (const operation of expected)
-      expect(section).toContain(
-        `references/${operation.id === 'config.get' ? 'config.md' : 'commands.md'}#board-${operation.cli.command.replaceAll(' ', '-')}`,
-      );
+    const links = [...section.matchAll(/^- \[`board ([^`]+)`\]\(references\/([^)#]+)#(.+)\)$/gm)];
+    expect(links.map((link) => link[1])).toEqual(expected.map((item) => item.cli.command));
+    for (const [, command = '', file = '', anchor] of links) {
+      expect(anchor).toBe(`board-${command.replaceAll(' ', '-')}`);
+      expect(readFileSync(`${refsPath}/${file}`, 'utf8')).toContain(`\n### \`board ${command}\`\n`);
+    }
   });
 
   it('renders each command once with CLI guidance, role modes, and shared error hints', () => {
