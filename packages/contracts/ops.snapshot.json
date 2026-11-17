@@ -1,5 +1,5 @@
 {
-  "version": "de134515d3ca2e95eb402f5a1887e444bb16979623ee2d29d57f8b6e59643bb3",
+  "version": "8c019d397b4066cfd07d27998f20604b1f4671e1364b495688f5de7f9bde70f3",
   "grants": [
     "operator",
     "project-agent",
@@ -1459,6 +1459,63 @@
                 "warmingUp": {
                   "type": "boolean",
                   "description": "Whether this source needs a complete poll in this daemon run."
+                },
+                "defaultBranch": {
+                  "description": "GitHub pull request sources only: the default-branch colour, red when the latest check run of a push-triggered workflow finished without success (failed, cancelled, timed out) or a commit status failed (scheduled and other runs ignored, branch protection not read); null until a poll reads it.",
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "branch": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Name of the default branch."
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": ["red", "green"],
+                          "description": "Colour of the default-branch head."
+                        },
+                        "sha": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{40,64}$",
+                          "description": "Head commit when this colour was first read; while red, the first red commit."
+                        },
+                        "since": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                          "description": "When the board first read this colour."
+                        },
+                        "confirmedAt": {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                          "description": "When a poll last read this colour; a poll that reads no colour keeps it."
+                        },
+                        "check": {
+                          "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }],
+                          "description": "Name of the first failing check, or null."
+                        },
+                        "url": {
+                          "anyOf": [{ "type": "string", "format": "uri" }, { "type": "null" }],
+                          "description": "Web URL of the failing run, or null."
+                        }
+                      },
+                      "required": [
+                        "branch",
+                        "state",
+                        "sha",
+                        "since",
+                        "confirmedAt",
+                        "check",
+                        "url"
+                      ],
+                      "additionalProperties": false,
+                      "description": "Colour of the default-branch head. It is red when the latest check run of a push-triggered workflow finished without success (failed, cancelled, timed out) or a commit status failed; scheduled, manual and other runs and check runs outside workflows are ignored, and branch protection is not read."
+                    },
+                    { "type": "null" }
+                  ]
                 }
               },
               "required": [
