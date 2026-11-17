@@ -15,22 +15,25 @@ is selected once configuration arrives. Back and Forward restore both layers.
 
 ## What it shows
 
-- The header shows the short key (hover for the full key), then the column and the time since
-  the task moved into it, such as `dev · 2h 9m`. Without such a move it shows the column alone.
-  The `Now` and `History` tabs and Close sit at its right.
+- The header reads `#7 · DEV · 2h 9m`: short key (hover for full key), uppercase column with
+  the active Now tab's weight and colour, then lowercase time since the move. No move omits time;
+  no task data shows only the key. Now/History tabs and Close sit at its right.
 - `Now` starts with the ticket title. It comes from the task's card on the Board, so it reads as
   a placeholder until the status read answers, and a task with no card in the chosen project has
   no title line.
 - Below the title come chips for the task's links: tickets, then pull requests, then sessions.
-  A pull request or a GitHub issue ticket written `<owner>/<repo>#<n>` is a link that opens
-  GitHub in a new tab. A session is a link to its Spur UI page,
-  `<web.spurUiOrigin>/sessions/<session id>`, also in a new tab; when `web.spurUiOrigin` is not
-  set it is plain text `session <id>`. A Jira-shaped ticket key such as `PROJ-12` links to
-  `<tracker baseUrl>/browse/<key>` of the open task's project, in a new tab, when it belongs to
-  that task's Jira project: its prefix before `-<number>` matches the task key's, in any case. A
-  key from another Jira project may live on another Jira site, so it is plain text. A Jira key is
-  plain text too when the project has no `ticketBrowseBase` in `config.get`, as a GitHub Issues
-  project; any other ticket ref is plain text too.
+  They reuse the card's bordered PR status cells with ticket, PR and terminal icons. The current
+  ticket uses its held card's Jira browse URL or safe observed URL, even without a browse base
+  or task link; unsafe/missing destinations stay plain, outside Tab order.
+  Long labels truncate with full accessible text and hover titles. Links use
+  the focus ring; text brightens on hover, focus within and touch.
+  Pull requests written `<owner>/<repo>#<n>` open GitHub in a new tab. Sessions open
+  `<web.spurUiOrigin>/sessions/<session id>`; without that origin they stay plain.
+  Extra tickets, and the current ticket without a matching held card, use these ref rules:
+  `<owner>/<repo>#<n>` opens GitHub; a Jira key such as `PROJ-12` uses the project's
+  `ticketBrowseBase` only when its prefix before `-<number>` matches the task's, ignoring case.
+  Other ticket refs, Jira keys from another project, or Jira keys without a browse base stay plain.
+  All links open new tabs.
 - `History` lists the task's journal events, newest first; events at the same time keep the
   reverse of their journal order. Each row shows the time (UTC, `hh:mm dd/mm/yy`), the summary
   with who did it, and the raw event kind, such as `turn_taken`. An agent reads as its session;

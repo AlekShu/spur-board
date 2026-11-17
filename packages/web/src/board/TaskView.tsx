@@ -3,6 +3,8 @@ import {
   Banner,
   Button,
   Chip,
+  focusRing,
+  Icon,
   CollapsibleSection,
   quiet,
   KeyValueBox,
@@ -17,6 +19,8 @@ import { TaskHistory } from './TaskHistory.tsx';
 import { shortKey } from './model.ts';
 import { age, linkChips, timeInColumn, whyRows, whySummary } from './task-model.ts';
 import styles from './TaskView.module.css';
+import cardStyles from './Card.module.css';
+import type { BoardRow } from './model.ts';
 
 const TABS_ID = 'task-tabs';
 const TABS = [
@@ -36,6 +40,7 @@ export function TaskView({
   task,
   history,
   title,
+  row,
   columns,
   spurUiOrigin,
   ticketBrowseBase,
@@ -61,6 +66,7 @@ export function TaskView({
   commentIntent: BoardData['commentIntent'];
   refreshTask: BoardData['refreshTask'];
   title: TaskTitle;
+  row: BoardRow | undefined;
   /** Enabled column ids of the task's project in `config.get` order. */
   columns: readonly string[];
   /** `config.get` `web.spurUiOrigin`: session chips link there; null keeps them plain. */
@@ -88,12 +94,21 @@ export function TaskView({
   const key = value?.task.key ?? task.key;
   const inColumn = value === undefined ? undefined : timeInColumn(value, now);
   const detail =
-    value === undefined
-      ? undefined
-      : inColumn === undefined
-        ? value.task.column
-        : `${value.task.column} · ${inColumn}`;
+    value === undefined ? undefined : (
+      <>
+        {' · '}
+        <span className={styles.columnName}>{value.task.column.toUpperCase()}</span>
+        {inColumn !== undefined && (
+          <>
+            {' · '}
+            <span className={styles.duration}>{inColumn}</span>
+          </>
+        )}
+      </>
+    );
   const failed = task.state === 'failed' || task.retrying;
+  const chips =
+    value === undefined ? [] : linkChips(value.links, key, spurUiOrigin, ticketBrowseBase, row);
   return (
     <Modal
       open
@@ -122,7 +137,7 @@ export function TaskView({
                   Could not load the task.
                 </Banner>
               )}
-              <div className={styles.top}>
+              <div className={`${quiet} ${styles.top ?? ''}`}>
                 {title.state === 'loading' ? (
                   <Skeleton widths={[60]} />
                 ) : (
@@ -130,18 +145,33 @@ export function TaskView({
                 )}
                 {value === undefined
                   ? task.state === 'loading' && <Skeleton />
-                  : value.links.length > 0 && (
+                  : chips.length > 0 && (
                       <div className={styles.links}>
-                        {linkChips(value.links, key, spurUiOrigin, ticketBrowseBase).map(
-                          (chip, index) =>
-                            // A link has no id of its own; its position in the list stays put.
-                            chip.href === null ? (
-                              <Chip key={index}>{chip.text}</Chip>
-                            ) : (
-                              <Chip key={index} href={chip.href} label={chip.label}>
-                                {chip.text}
-                              </Chip>
-                            ),
+                        {chips.map((chip, index) =>
+                          // A link has no id of its own; its position in the list stays put.
+                          chip.href === null ? (
+                            <span
+                              key={index}
+                              className={`${cardStyles.cell ?? ''} ${cardStyles.standalone ?? ''}`}
+                              title={chip.text}
+                            >
+                              <Icon name={chip.icon} />
+                              <span className={styles.linkText}>{chip.text}</span>
+                            </span>
+                          ) : (
+                            <a
+                              key={index}
+                              className={`${cardStyles.cell ?? ''} ${cardStyles.standalone ?? ''} ${focusRing}`}
+                              href={chip.href}
+                              aria-label={chip.label}
+                              title={chip.text}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              <Icon name={chip.icon} />
+                              <span className={styles.linkText}>{chip.text}</span>
+                            </a>
+                          ),
                         )}
                       </div>
                     )}
@@ -230,7 +260,7 @@ function TaskDiscussion({
         summary={`${String(blocks.filter((block) => block.state === 'open').length)} open`}
       >
         <div className={styles.items}>
-          {blocks.length === 0 && <p className={styles.note}>No blocks on this task.</p>}
+          {blocks.length === 0 && <p className={styles.empty}>No blocks on this task.</p>}
           {blocks.map((block) => {
             const question = block.type === 'needs_input';
             const mine = block.state === 'open' && block.addressee === 'operator';
@@ -293,6 +323,7 @@ function TaskDiscussion({
       </CollapsibleSection>
       <CollapsibleSection title="Comments" count={comments.length}>
         <div className={styles.items}>
+          {comments.length === 0 && <p className={styles.empty}>No comments on this task.</p>}
           {comments.map((comment) => (
             <article key={comment.id} className={`${quiet} ${styles.item ?? ''}`}>
               <div className={styles.metadata}>

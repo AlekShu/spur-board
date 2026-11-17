@@ -15,8 +15,9 @@ Only an open question (`needs_input`) addressed to the operator has an answer fo
 `Follow-up on B<n>`, with **Send follow-up**, which calls `block.followup`, and an icon
 **Cancel** that closes it and sends nothing. A sent follow-up closes the field and shows as the
 block's next reply. Cancel after a failed send keeps the text and its key. **Comments** lists
-task comments with their authors, ids and ages, excluding block replies. Its composer stays
-available with count zero. **Add comment** calls `comment.add` for the task. Answering agent
+task comments with their authors, ids and ages, excluding block replies. Empty comments read
+`No comments on this task.` above the usable composer. Empty Blocks, Comments and History lines
+use the same inner padding as Why rows. **Add comment** calls `comment.add` for the task. Answering agent
 blocks, and editing or deleting comments remain outside this view.
 
 The forms retain exact text on failure and announce the error. Blank or whitespace-only text
