@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { runCommand } from '../packages/cli/src/service.ts';
+import { waitForTarball, type TarballDeps } from '../packages/cli/src/tarball.ts';
 import { packPackage } from './package.ts';
 import {
   credentialFreeEnv,
@@ -60,6 +62,9 @@ function tarball404Path(result: string | Error): string | undefined {
 interface InstallDeps {
   sleep: (ms: number) => Promise<unknown>;
   log: (text: string) => void;
+  now?: () => number;
+  environment?: NodeJS.ProcessEnv;
+  runner?: TarballDeps['runner'];
 }
 
 const installDeps: InstallDeps = {
@@ -67,15 +72,50 @@ const installDeps: InstallDeps = {
   log: (text) => process.stdout.write(`${text}\n`),
 };
 
+/** Keep smoke-specific diagnostics and classification around the shared readiness policy. */
+async function confirmTarball(spec: string, deps: InstallDeps): Promise<void> {
+  const runner = deps.runner ?? runCommand;
+  const outcome = await waitForTarball(spec, {
+    runner: async (command, args, options) => {
+      if ((options?.timeoutMs ?? 1) <= 0) {
+        return { exitCode: 1, stdout: '', stderr: '', timedOut: true };
+      }
+      const result = await runner(command, [...args, '--ignore-scripts'], options);
+      const failure = new Error(`Tarball preflight failed: ${result.stderr || result.stdout}`);
+      if (result.exitCode !== 0 && !result.timedOut && tarball404Path(failure) === undefined) {
+        throw failure;
+      }
+      return result;
+    },
+    sleep: async (ms) => {
+      await deps.sleep(ms);
+    },
+    now: deps.now ?? (() => performance.now()),
+    env: credentialFreeEnv(deps.environment ?? process.env),
+    onWait: ({ waitMs, waitedMs, boundMs }) => {
+      deps.log(
+        `upgrade smoke: npm registry lag/404 for ${spec}, elapsed ${String(Math.floor(waitedMs))} ms, retrying in ${String(waitMs)} ms (bound ${String(boundMs)} ms)`,
+      );
+    },
+  });
+  if (outcome.ok) return;
+  if (outcome.reason === 'failed') {
+    throw new Error(`Tarball preflight failed: ${outcome.result.stderr || outcome.result.stdout}`);
+  }
+  throw new Error(
+    `upgrade smoke: npm registry lag for ${spec}: tarball not ready within ${String(outcome.boundMs)} ms`,
+  );
+}
+
 /**
- * Installs a published registry spec, waiting out the CDN lag while npmjs answers 404 for a
- * tarball it already lists. Any other install failure throws on the first attempt.
+ * Waits for a verified published tarball, then installs it with dependency-tarball retries.
  */
 export async function installPublished(
   spec: string,
   prefix: string,
   deps: InstallDeps = installDeps,
 ): Promise<string> {
+  await confirmTarball(spec, deps);
   const { result, attempts, waitedMs } = await retryTarball404<string | Error>(
     () => {
       try {
