@@ -81,10 +81,13 @@ connect to the loopback port. Without a credential they can:
 - check a token's status by its hash;
 - request an operator token, which only raises an approval item for the operator; at most 10
   requests wait at once;
-- make the daemon send its fixed skill reload message to the live sessions of configured Spur
-  projects, at most once per session for the version the daemon runs;
-- for session ids they already know, read whether and when each got that message; the daemon
-  never lists a session id the request does not name.
+- make the daemon send its skill reload message, fixed text naming allowlisted skill file names,
+  to the live sessions of configured Spur projects; the file change times in the request decide
+  which names appear and which sessions get one, at most once per session for the version the
+  daemon runs;
+- for session ids they already know, read whether and when each got that message, for one
+  version or the newest of each state across versions; the daemon never lists a session id the
+  request does not name.
 
 On the agent API they cannot run board operations without a live session id from a configured
 Spur project or an approved token. With web enabled, they can use its operator operations without

@@ -1104,8 +1104,15 @@ describe('board doctor', () => {
     expect(seen).toContain('/usr/bin/no\\"de');
   });
 
-  const stopAndWake = (count: string, ids: string, forVersion = ' for 1.2.3') =>
-    `Stop and wake ${count} started before the last skill install that have no delivered reload message${forVersion}${ids}; stopping and waking restarts the agent and keeps the conversation. A session can instead read the spur-board skill again, SKILL.md and every file in its references/ folder: ~/.claude/skills/spur-board/ for Claude Code, ~/.codex/skills/spur-board/ for Codex ($CODEX_HOME/skills/spur-board/ when set); doctor keeps listing it after that.`;
+  const everyFile =
+    'read the spur-board skill again, SKILL.md and every file in its references/ folder:';
+  const stopAndWake = (
+    count: string,
+    ids: string,
+    forVersion = ' for 1.2.3',
+    readAgain = everyFile,
+  ) =>
+    `Stop and wake ${count} started before the spur-board skill files last changed that have no delivered reload message${forVersion}${ids}; stopping and waking restarts the agent and keeps the conversation. A session can instead ${readAgain} ~/.claude/skills/spur-board/ for Claude Code, ~/.codex/skills/spur-board/ for Codex ($CODEX_HOME/skills/spur-board/ when set); doctor keeps listing it after that.`;
   const undatedToo = 'Do the same for connected sessions whose start time is unavailable.';
 
   it('warns for confirmed stale sessions without failing doctor', async () => {
@@ -1204,7 +1211,7 @@ describe('board doctor', () => {
   ];
   function reloadFetcher(
     requests: { url: string; init: RequestInit | undefined }[],
-    reply: () => Response = () =>
+    reply: (init: RequestInit | undefined) => Response = () =>
       Response.json({
         ok: true,
         requestId: 'req-1',
@@ -1215,7 +1222,7 @@ describe('board doctor', () => {
       if (!(input instanceof URL)) throw new Error('Expected a URL.');
       if (input.pathname === reloadsPath) {
         requests.push({ url: input.href, init });
-        return Promise.resolve(reply());
+        return Promise.resolve(reply(init));
       }
       return ports().fetcher(input, init);
     };
@@ -1243,7 +1250,6 @@ describe('board doctor', () => {
     expect(requests[0]?.init?.method).toBe('POST');
     expect(requests[0]?.init?.body).toBe(
       JSON.stringify({
-        version: '1.2.3',
         sessions: ['delivered', 'failed', 'missing', 'pending', 'rolled', 'undated-ok'],
       }),
     );
@@ -1315,6 +1321,211 @@ describe('board doctor', () => {
     );
   });
 
+  const changedStamp = (
+    version: string,
+    installedAt: string,
+    files: Record<string, { changedAt: string; changedIn: string }>,
+  ) =>
+    JSON.stringify({
+      version,
+      installedAt,
+      files: Object.fromEntries(
+        Object.entries(files).map(([path, entry]) => [path, { sha256: 'a'.repeat(64), ...entry }]),
+      ),
+    });
+  const changedPorts = (
+    boardStamp: string,
+    sessions: ReturnType<typeof session>[],
+    fetcher: DoctorPorts['fetcher'],
+  ) =>
+    ports({
+      readText(path) {
+        if (path.endsWith('spur-board/.spur-board-install.json')) return boardStamp;
+        return ports().readText(path);
+      },
+      sessions: () => sessions,
+      fetcher,
+    });
+  const referenceChange = '2026-11-04T09:00:00.000Z';
+  const referenceOnly = {
+    'SKILL.md': { changedAt: '2026-11-02T09:00:00.000Z', changedIn: '1.2.2' },
+    'references/a.md': { changedAt: referenceChange, changedIn: '1.2.3' },
+  };
+  const noRecords = () =>
+    Response.json({ ok: true, requestId: 'r', value: { version: '1.2.3', sessions: [] } });
+
+  it('names only the file changed after the session started', async () => {
+    const requests: { url: string; init: RequestInit | undefined }[] = [];
+    const value = await run(
+      ['doctor', '--json'],
+      changedPorts(
+        changedStamp('1.2.3', referenceChange, referenceOnly),
+        [session('old', 'worker', Date.parse('2026-11-03T00:00:00.000Z'))],
+        reloadFetcher(requests, noRecords),
+      ),
+    );
+    expect(requests.map((request) => request.init?.body)).toEqual([
+      JSON.stringify({ sessions: ['old'] }),
+    ]);
+    expect(value.checks.find((entry) => entry.id === 'sessions.stale')?.fix).toBe(
+      stopAndWake(
+        '1 session',
+        ': old',
+        ' for 1.2.3',
+        'read these files of the spur-board skill again: references/a.md, under',
+      ),
+    );
+  });
+
+  it('passes a session started after the last content change despite a newer install', async () => {
+    const requests: { url: string; init: RequestInit | undefined }[] = [];
+    const value = await run(
+      ['doctor', '--json'],
+      changedPorts(
+        changedStamp('1.2.4', '2026-11-05T09:00:00.000Z', {
+          'SKILL.md': { changedAt: '2026-11-02T09:00:00.000Z', changedIn: '1.2.2' },
+        }),
+        [session('started', 'worker', Date.parse('2026-11-03T00:00:00.000Z'))],
+        reloadFetcher(requests, noRecords),
+      ),
+    );
+    expect(requests).toEqual([]);
+    expect(value.checks.find((entry) => entry.id === 'sessions.stale')?.status).toBe('pass');
+  });
+
+  it('asks an undated session to read every file even when the stamp lists changes', async () => {
+    const requests: { url: string; init: RequestInit | undefined }[] = [];
+    const value = await run(
+      ['doctor', '--json'],
+      changedPorts(
+        changedStamp('1.2.3', referenceChange, referenceOnly),
+        [session('undated', 'worker', undefined)],
+        reloadFetcher(requests, noRecords),
+      ),
+    );
+    expect(value.checks.find((entry) => entry.id === 'sessions.stale')?.fix).toBe(
+      `${stopAndWake('sessions', '')} ${undatedToo}`,
+    );
+  });
+
+  interface StoredReload {
+    version: string;
+    id: string;
+    state: 'delivered' | 'pending' | 'failed';
+    queuedAt: string;
+  }
+  /**
+   * A daemon over stored reload rows: without a version it answers each session's newest record
+   * per state over every version; `older` answers usage to that, as a daemon before it did.
+   */
+  function daemonReloads(rows: readonly StoredReload[], older: boolean) {
+    return (init: RequestInit | undefined): Response => {
+      const body = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as {
+        version?: string;
+        sessions: string[];
+      };
+      if (body.version === undefined && older) {
+        return Response.json({ code: 'usage' }, { status: 400 });
+      }
+      const newest = new Map<string, StoredReload>();
+      for (const row of rows) {
+        if (!body.sessions.includes(row.id)) continue;
+        if (body.version !== undefined && row.version !== body.version) continue;
+        const kept = newest.get(`${row.id}:${row.state}`);
+        if (kept === undefined || row.queuedAt > kept.queuedAt) {
+          newest.set(`${row.id}:${row.state}`, row);
+        }
+      }
+      return Response.json({
+        ok: true,
+        requestId: 'r',
+        value: {
+          ...(body.version === undefined ? {} : { version: body.version }),
+          sessions: [...newest.values()].map(({ id, state, queuedAt }) => ({
+            id,
+            state,
+            queuedAt,
+          })),
+        },
+      });
+    };
+  }
+  const missed = { version: '1.2.3', id: 's', queuedAt: '2026-11-04T09:00:01.000Z' } as const;
+  const anyVersion = JSON.stringify({ sessions: ['s'] });
+
+  it.each<{
+    name: string;
+    rows: StoredReload[];
+    older?: boolean;
+    status: 'pass' | 'warning';
+    fix: string | null;
+    bodies: string[];
+  }>([
+    {
+      name: 'a catch-up delivered under an intermediate version clears it',
+      rows: [
+        { ...missed, state: 'failed' },
+        { version: '1.2.4', id: 's', state: 'delivered', queuedAt: '2026-11-05T09:00:01.000Z' },
+      ],
+      status: 'pass',
+      fix: null,
+      bodies: [anyVersion],
+    },
+    {
+      name: 'a delivered reload older than the content change keeps it',
+      rows: [
+        { version: '1.2.2', id: 's', state: 'delivered', queuedAt: '2026-11-03T12:00:00.000Z' },
+      ],
+      status: 'warning',
+      fix: stopAndWake(
+        '1 session',
+        ': s',
+        ' for 1.2.3',
+        'read these files of the spur-board skill again: references/a.md, under',
+      ),
+      bodies: [anyVersion],
+    },
+    {
+      name: 'a pending reload after the content change lists it as queued',
+      rows: [
+        { ...missed, state: 'failed' },
+        { version: '1.2.4', id: 's', state: 'pending', queuedAt: '2026-11-05T09:00:01.000Z' },
+      ],
+      status: 'warning',
+      fix: "The board's reload message for 1.2.3 is still queued for 1 session: s; rerun board doctor in a minute.",
+      bodies: [anyVersion],
+    },
+    {
+      name: 'an older daemon is asked per version and its newest-version delivery clears it',
+      rows: [
+        { version: '1.2.5', id: 's', state: 'delivered', queuedAt: '2026-11-06T09:00:01.000Z' },
+      ],
+      older: true,
+      status: 'pass',
+      fix: null,
+      bodies: [
+        anyVersion,
+        JSON.stringify({ version: '1.2.3', sessions: ['s'] }),
+        JSON.stringify({ version: '1.2.5', sessions: ['s'] }),
+      ],
+    },
+  ])('after a content change in 1.2.3 and installs up to 1.2.5: $name', async (row) => {
+    const requests: { url: string; init: RequestInit | undefined }[] = [];
+    const value = await run(
+      ['doctor', '--json'],
+      changedPorts(
+        changedStamp('1.2.5', '2026-11-06T09:00:00.000Z', referenceOnly),
+        [session('s', 'worker', Date.parse('2026-11-03T00:00:00.000Z'))],
+        reloadFetcher(requests, daemonReloads(row.rows, row.older ?? false)),
+      ),
+    );
+    expect(requests.map((request) => request.init?.body)).toEqual(row.bodies);
+    expect(value.checks.find((entry) => entry.id === 'sessions.stale')).toMatchObject({
+      status: row.status,
+      fix: row.fix,
+    });
+  });
+
   it('sends no reload lookup when no session is stale or undated', async () => {
     const requests: { url: string; init: RequestInit | undefined }[] = [];
     const value = await run(['doctor', '--json'], ports({ fetcher: reloadFetcher(requests) }));
@@ -1376,9 +1587,7 @@ describe('board doctor', () => {
     );
     expect(staleFix(value)).toBe(stopAndWake('1 session', ': live-1'));
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.init?.body).toBe(
-      JSON.stringify({ version: '1.2.3', sessions: ['live-1'] }),
-    );
+    expect(requests[0]?.init?.body).toBe(JSON.stringify({ sessions: ['live-1'] }));
     expect(value.text).not.toContain('ended-1');
   });
 

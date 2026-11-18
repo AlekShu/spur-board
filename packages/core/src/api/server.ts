@@ -4,6 +4,7 @@ import {
   OPERATIONS,
   buildCatalogSnapshot,
   doctorReportSchema,
+  skillReloadFilesSchema,
   successEnvelopeSchema,
   tokenRequestResultSchema,
   tokenRequestSchema,
@@ -59,8 +60,14 @@ export interface ApiOptions extends IdentityPorts {
 }
 
 const tokenStatusSchema = z.strictObject({ hash: tokenRequestSchema.shape.hash });
-const skillReloadSchema = z.strictObject({ version: SKILL_VERSION });
-const skillReloadsSchema = z.strictObject({ version: SKILL_VERSION, sessions: RELOAD_SESSIONS });
+const skillReloadSchema = z.strictObject({
+  version: SKILL_VERSION,
+  files: skillReloadFilesSchema.optional(),
+});
+const skillReloadsSchema = z.strictObject({
+  version: SKILL_VERSION.optional(),
+  sessions: RELOAD_SESSIONS,
+});
 
 function header(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? undefined : value;
@@ -186,7 +193,10 @@ export async function createApiServer(options: ApiOptions): Promise<FastifyInsta
     );
   });
 
-  /** Anonymous: the message is fixed and goes at most once per session for the running version. */
+  /**
+   * Anonymous: the message is fixed text with allowlisted file names and goes at most once per
+   * session for the running version.
+   */
   app.post('/v1/skills/reload', async (request, reply) => {
     if (!options.ready()) throw notReady();
     if (options.productVersion === undefined) {
@@ -196,7 +206,7 @@ export async function createApiServer(options: ApiOptions): Promise<FastifyInsta
     if (!parsed.success) {
       throw new CommandError(
         'usage',
-        'Send {"version": "<x.y.z>"} with the installed spur-board version.',
+        'Send {"version": "<x.y.z>"} with the installed spur-board version, and optionally "files": {"<SKILL.md or references/<name>.md>": "<ISO time it changed>"}.',
       );
     }
     if (parsed.data.version !== options.productVersion) {
@@ -205,12 +215,13 @@ export async function createApiServer(options: ApiOptions): Promise<FastifyInsta
         `The daemon runs ${options.productVersion}. Run \`board service restart\` to start the installed version.`,
       );
     }
-    const { version } = parsed.data;
+    const { version, files } = parsed.data;
     const { queued } = await requestSkillReload(
       options.store,
       options.config,
       version,
       new Date(options.clock.now()),
+      files,
     );
     return reply.send(
       successEnvelopeSchema.parse({ ok: true, requestId: request.id, value: { version, queued } }),
@@ -224,7 +235,7 @@ export async function createApiServer(options: ApiOptions): Promise<FastifyInsta
     if (!parsed.success) {
       throw new CommandError(
         'usage',
-        'Send {"version": "<x.y.z>", "sessions": ["<session id>", ...]} with 1 to 200 session ids.',
+        'Send {"sessions": ["<session id>", ...]} with 1 to 200 session ids, and optionally "version": "<x.y.z>" for that version only.',
       );
     }
     const { version, sessions } = parsed.data;
@@ -233,7 +244,7 @@ export async function createApiServer(options: ApiOptions): Promise<FastifyInsta
       successEnvelopeSchema.parse({
         ok: true,
         requestId: request.id,
-        value: { version, sessions: records },
+        value: version === undefined ? { sessions: records } : { version, sessions: records },
       }),
     );
   });
