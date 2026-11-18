@@ -68,7 +68,7 @@ Fix or answer every open PR point once, with a reason for each rejection.
   GitHub login, and it would rewrite another session's comment.
 - Sign every post: the session marker from your launch instructions, else
   `[AI-generated, session: $SPUR_SESSION]` with the variable expanded, as the last line, once.
-- Resolve each thread you replied to, fixed, rejected or out of scope: after the reply, and
+- Resolve each thread you replied to (fixed, rejected or out of scope), after the reply and
   after the push for a fix:
 
   ```
@@ -76,10 +76,7 @@ Fix or answer every open PR point once, with a reason for each rejection.
     mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}'
   ```
 
-- An answered but unresolved thread still returns the task to Dev (`requireResolvedThreads`,
-  `docs/how-board-works-columns.md`). A reviewer who disagrees reopens it: reply to the comments
-  after your last reply, then resolve again. No such comment -> ask once in the thread what is
-  still missing and leave it unresolved; do not repeat the question in a later round.
+- A reopened thread -> `references/reopened-threads.md`.
 
 ## 5. Repeat and report
 
