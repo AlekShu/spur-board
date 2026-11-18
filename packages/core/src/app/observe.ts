@@ -45,17 +45,20 @@ import {
 import type { Store } from '../store/store.ts';
 import {
   emit,
+  markTaskChanged,
   parseDefaultBranch,
   pastReopenFloor,
   projectForKey,
   projectForSource,
   ticketDone,
+  taskChangeAt,
   type Trx,
 } from './board-utils.ts';
 import { enqueueLiveAfterFirstPoll } from './doctor.ts';
 import { reconcileMembership } from './membership-rules.ts';
 import { reconcileItems } from './fromYou.ts';
 import {
+  dispatchDoneTickets,
   dispatchJournaled,
   dispatchMergedTickets,
   dispatchSource,
@@ -211,7 +214,8 @@ async function sourceState(
     .onConflict((oc) =>
       oc.column('source').doUpdateSet((eb) => ({
         initialized: observedAt === undefined ? eb.ref('source_state.initialized') : 1,
-        last_complete_at: state.lastCompleteAt ?? null,
+        // No new complete stamp does not revoke a proof already accepted by this board.
+        last_complete_at: state.lastCompleteAt ?? eb.ref('source_state.last_complete_at'),
         blind_reason: state.blind?.reason ?? null,
         blind_message: state.blind?.message ?? null,
         cursor: cursor ?? eb.ref('source_state.cursor'),
@@ -465,7 +469,7 @@ async function ticket(
   } else if (task.tracker_id !== fact.id || task.key !== fact.key) {
     await trx
       .updateTable('task')
-      .set({ tracker_id: fact.id, key: fact.key, last_change_at: at })
+      .set({ tracker_id: fact.id, key: fact.key, last_change_at: taskChangeAt(at) })
       .where('id', '=', task.id)
       .execute();
   }
@@ -513,7 +517,7 @@ async function ticket(
         await setReopenFloor(trx, task.id, at);
     }
     await emit(trx, 'ticket_facts_changed', project.id, task.id, at, { facts: fact });
-    await trx.updateTable('task').set({ last_change_at: at }).where('id', '=', task.id).execute();
+    await markTaskChanged(trx, task.id, at);
   }
   if (
     fact.inFilter &&
@@ -746,7 +750,7 @@ async function pr(
         });
     }
     await emit(trx, 'pr_facts_changed', task.project, task.id, at, { facts: fact });
-    await trx.updateTable('task').set({ last_change_at: at }).where('id', '=', task.id).execute();
+    await markTaskChanged(trx, task.id, at);
   }
 }
 
@@ -1066,7 +1070,7 @@ async function session(
         to: fact.lifecycle,
       });
     await emit(trx, 'session_facts_changed', task.project, task.id, at, { facts: fact });
-    await trx.updateTable('task').set({ last_change_at: at }).where('id', '=', task.id).execute();
+    await markTaskChanged(trx, task.id, at);
   }
 }
 
@@ -1198,6 +1202,7 @@ export function createObservationCore(deps: {
   warnSkipped: WarnSkipped;
 } {
   const { store, config, clock } = deps;
+  const transact = <T>(fn: (trx: Trx) => Promise<T>) => scanTransaction(store, config, fn, clock);
   const completeSince = new Map<string, string>();
   const healthySince = new Map<string, string>();
   const warnSkipped = warnSkippedOnce(deps.warn);
@@ -1366,7 +1371,7 @@ export function createObservationCore(deps: {
       const { batch } = observation;
       // Read once: every scan pass must build the same gateway strings (`scanTransaction`).
       const now = clock.now();
-      await scanTransaction(store, config, async (trx) => {
+      await transact(async (trx) => {
         const wasBlind = await blindReason(trx, source);
         // Capture the prior deadline before this batch replaces source_state. A fresh poll
         // may be the first event after a gap, before any tick or stale-state report.
@@ -1543,6 +1548,7 @@ export function createObservationCore(deps: {
               .where('id', '=', link.task_id)
               .executeTakeFirstOrThrow();
             // The lifecycle did not change, so only the facts row journals the end.
+            await markTaskChanged(trx, task.id, batch.observedAt);
             await emit(trx, 'session_facts_changed', task.project, task.id, batch.observedAt, {
               facts: ended,
             });
@@ -1612,7 +1618,7 @@ export function createObservationCore(deps: {
               });
               await trx
                 .updateTable('task')
-                .set({ last_change_at: batch.observedAt })
+                .set({ last_change_at: taskChangeAt(batch.observedAt) })
                 .where('id', '=', row.task_id)
                 .execute();
             }
@@ -1643,6 +1649,7 @@ export function createObservationCore(deps: {
         const recovered = wasBlind !== null && observation.state.blind === undefined;
         if ((observation.effectiveComplete && !completeSince.has(source)) || recovered)
           await dispatchSource(trx, source, dispatchContext);
+        if (observation.effectiveComplete) await dispatchDoneTickets(trx, source, dispatchContext);
         await dispatchMergedTickets(trx, source, dispatchContext);
         await dispatchJournaled(trx, dispatchContext);
         await reconcileItems(
@@ -1672,7 +1679,7 @@ export function createObservationCore(deps: {
     },
     async reportSourceState(source, state, usage) {
       const now = clock.now();
-      await scanTransaction(store, config, async (trx) => {
+      await transact(async (trx) => {
         const wasBlind = await blindReason(trx, source);
         await sourceState(trx, source, state);
         await recordUsage(trx, source, usage, now);
@@ -1684,7 +1691,7 @@ export function createObservationCore(deps: {
     },
     notice(kind, value) {
       const at = new Date(clock.now()).toISOString();
-      return scanTransaction(store, config, async (trx) => {
+      return transact(async (trx) => {
         const key = `spur-notice:${kind}:${value}`;
         const old = await trx
           .selectFrom('meta')

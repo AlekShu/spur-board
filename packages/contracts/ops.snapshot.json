@@ -1,5 +1,5 @@
 {
-  "version": "b8dd43df6dc7530aaf2b59ea1ecb310d847413e2a6029b2e1be613af49df0016",
+  "version": "9eadccb6313548bcf0f9eab7cdf3e38e6d729264e8640e28d1425a7c8980ba67",
   "grants": [
     "operator",
     "project-agent",
@@ -5430,6 +5430,7 @@
                         "gate_passed",
                         "gate_broken",
                         "merged",
+                        "ticket_done_no_pr",
                         "ticket_reopened",
                         "mode_changed",
                         "returned",
@@ -10780,6 +10781,7 @@
                     "gate_passed",
                     "gate_broken",
                     "merged",
+                    "ticket_done_no_pr",
                     "ticket_reopened",
                     "mode_changed",
                     "returned",

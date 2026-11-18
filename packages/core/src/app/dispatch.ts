@@ -23,9 +23,11 @@ import {
   emit,
   mergedTicket,
   parsePr,
+  pastReopenFloor,
   projectForSource,
   taskMergedPr,
   taskPr,
+  taskChangeAt,
   ticketDone,
   type Trx,
 } from './board-utils.ts';
@@ -52,8 +54,8 @@ import {
 } from './turns.ts';
 
 // The dispatcher applies the pure cascade of `domain/dispatch.ts` inside its caller's
-// transaction. It reads no clock and does no IO: `at` and the complete-poll map come from the
-// caller, so a scan replay makes the same writes.
+// transaction. Event times and the complete-poll map come from the caller; task-change
+// watermarks also sample the scan transaction's clock when accepting a relevant change.
 
 type Task = Row<'task'>;
 type Project = Config['projects'][number];
@@ -185,7 +187,7 @@ export async function moveLeft(
       column: to,
       column_epoch: task.column_epoch + 1,
       left_moves: task.left_moves + 1,
-      last_change_at: at.toISOString(),
+      last_change_at: taskChangeAt(at.toISOString()),
     })
     .where('id', '=', task.id)
     .returningAll()
@@ -272,7 +274,7 @@ async function syncModes(trx: Trx, config: Config, at: Date): Promise<void> {
           .set({
             column: task.shadow_column,
             column_epoch: task.column_epoch + 1,
-            last_change_at: at.toISOString(),
+            last_change_at: taskChangeAt(at.toISOString()),
           })
           .where('id', '=', task.id)
           .execute();
@@ -339,8 +341,12 @@ export async function correctColumn(
     .updateTable('task')
     .set(
       shadow
-        ? { shadow_column: to, last_change_at: at.toISOString() }
-        : { column: to, column_epoch: task.column_epoch + 1, last_change_at: at.toISOString() },
+        ? { shadow_column: to, last_change_at: taskChangeAt(at.toISOString()) }
+        : {
+            column: to,
+            column_epoch: task.column_epoch + 1,
+            last_change_at: taskChangeAt(at.toISOString()),
+          },
     )
     .where('id', '=', task.id)
     .execute();
@@ -803,6 +809,29 @@ export async function readInput(
   if (mergedOpen !== undefined) pr = null;
   const repos = pr === null ? project.repos : [pr.repo];
   const githubBlind = repos.some((repo) => blind(prSourceId(project.id, repo)));
+  const sourceReady = (source: string) => {
+    const complete = clock.complete.get(source);
+    return (
+      !blind(source) &&
+      complete !== undefined &&
+      complete > (task.last_change_at ?? task.created_at)
+    );
+  };
+  const allGithubReposReady = project.repos.every((repo) =>
+    sourceReady(prSourceId(project.id, repo)),
+  );
+  const ticket = await readTicket();
+  const done = ticket !== undefined && ticketDone(project, ticket.status);
+  const hasOpenLinkedPr =
+    (await trx
+      .selectFrom('link')
+      .select('id')
+      .where('task_id', '=', task.id)
+      .where('entity', '=', 'pr')
+      .where('banned', '=', 0)
+      .where('pr_open', '=', 1)
+      .where(pastReopenFloor)
+      .executeTakeFirst()) !== undefined;
   const last =
     mode === 'shadow'
       ? undefined
@@ -875,12 +904,17 @@ export async function readInput(
       },
       reopened:
         mergedOpen === undefined &&
-        (await trx
-          .selectFrom('link')
-          .select('id')
-          .where('task_id', '=', task.id)
-          .where('reopen_hidden_at', 'is not', null)
-          .executeTakeFirst()) !== undefined,
+        ((column === 'done' && !done && task.reopened_at !== null) ||
+          (await trx
+            .selectFrom('link')
+            .select('id')
+            .where('task_id', '=', task.id)
+            .where('reopen_hidden_at', 'is not', null)
+            .executeTakeFirst()) !== undefined),
+      ticketDone: done,
+      hasOpenLinkedPr,
+      allGithubReposReady,
+      spurReady: sourceReady('spur'),
       openPr: link?.open === true,
       githubBlind,
       spurBlind: blind('spur'),
@@ -975,7 +1009,7 @@ async function applyOn(
     }
     current = await trx
       .updateTable('task')
-      .set({ column: move.to, last_change_at: at.toISOString() })
+      .set({ column: move.to, last_change_at: taskChangeAt(at.toISOString()) })
       .where('id', '=', current.id)
       .returningAll()
       .executeTakeFirstOrThrow();
@@ -1190,6 +1224,39 @@ export async function dispatchSource(
     tasks.map((task) => task.id),
     ctx,
   );
+}
+
+/** Unchanged complete repository and Spur polls can confirm absence after the task changed. */
+export async function dispatchDoneTickets(
+  trx: Trx,
+  source: string,
+  ctx: DispatchContext,
+): Promise<void> {
+  const projects = ctx.config.projects.filter(
+    (entry) =>
+      source === 'spur' || entry.repos.some((repo) => prSourceId(entry.id, repo) === source),
+  );
+  for (const project of projects) {
+    const tasks = await trx
+      .selectFrom('task')
+      .innerJoin('ticket_snapshot', 'ticket_snapshot.task_id', 'task.id')
+      .select(['task.id', 'ticket_snapshot.status'])
+      .where('task.project', '=', project.id)
+      .where('task.membership', '!=', 'archived')
+      .where(
+        project.dispatcher.mode === 'shadow'
+          ? sql<string>`coalesce(task.shadow_column, task.column)`
+          : sql<string>`task.column`,
+        '!=',
+        'done',
+      )
+      .execute();
+    await dispatchTasks(
+      trx,
+      tasks.filter((task) => ticketDone(project, task.status)).map((task) => task.id),
+      ctx,
+    );
+  }
 }
 
 /**
