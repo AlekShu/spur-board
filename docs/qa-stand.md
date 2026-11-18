@@ -13,6 +13,10 @@ Every stand needs a readable, valid live board `config.yaml`: `pnpm stand` finds
 `BOARD_HOME`, else `XDG_CONFIG_HOME` (default `~/.config`), checks its ports against it, and
 refuses with `live_config` when it is missing, unreadable or invalid.
 
+pnpm prints its `$ node …` script echo on stderr, so a pipe or `> file` gets only the command's
+output. Parse JSON from stdout alone, never through `2>&1`; `pnpm --silent stand …` drops the
+echo and keeps the command's own stderr and exit code, while `pnpm -s` does not drop it.
+
 Agents read the skills `qa-stand`, `qa-seed` and `qa-report` before a QA round.
 
 ## Driving pnpm stand mcp from a shell
