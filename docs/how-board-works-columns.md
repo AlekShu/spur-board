@@ -1,5 +1,41 @@
 # Columns and executors
 
+`board columns describe [--project <project>]` (`columns_describe` in MCP) reads
+effective exit rules, return triggers and limits, executors, question escalation and
+silence timing for visible enabled columns. JSON keeps condition and column IDs;
+a terminal shows their readable text. Gates accumulate from columns to the left;
+each rule is listed once at its effective owner. This is policy, not task state:
+use `board task <KEY> --why` for current gates and turns. Named sessions are the
+project-selected live sessions used by doctor. Orchestrator recipients, including
+executor turns bound to a curator, may instead use a live author or task-linked
+orchestrator session. Questions and course checks addressed to the curator always
+use its current project-selected session. Executor turns bound to an orchestrator
+or curator and ordinary orchestrator questions wait for a live recipient. Questions
+addressed to the curator and course checks addressed to an agent fall back to the
+operator when no live recipient exists.
+
+`escalation.silent` uses per-column `quietTurnAfterMs` for named turns;
+worker turns keep the global idle threshold. `escalation.noRecipient` gives the
+`noRecipientAfterMs` operator-item policy for untaken named turns waiting for a
+session; it does not reroute them.
+
+`exit.to` describes normal gate progression: it is null at the last enabled stage
+before Done and at Done itself. Passing green checks and submitting an open PR
+does not complete a task. The project's separate `completion` route reaches Done
+from any other column: an eligible linked merged PR with a done ticket, or a done
+ticket with no open linked PR or live worker after fresh, complete, non-blind
+observations of every configured repository and Spur since the task changed.
+Done means GitHub `closed` or the project's Jira `doneStatuses`; the returned text
+names effective statuses and the tracker interval. After a merge, a missing or
+unconfirmed ticket holds dispatch. An open ticket resumes work without the merged
+PR only when observed at least one tracker interval after the merge, in the filter
+or for a manually included task; dropped-filter evidence alone stays unconfirmed.
+These alternatives bypass normal gates, including Ready to Merge's merged
+condition. Blind GitHub or a pending submit holds both routes. Archived tasks are
+excluded; links must be unbanned and past the reopen floor, and missing/unreadable
+chosen or fallback PR facts hold evaluation. Cycle holds allow completion;
+dispatcher `on` applies moves while `shadow` computes only a shadow position.
+
 ## Columns and executors
 
 `todo`, `triage`, `ready-for-dev`, `dev`, `review`, `product-review`,

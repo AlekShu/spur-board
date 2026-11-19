@@ -118,6 +118,7 @@ describe('catalog', () => {
     ).toEqual([
       'block.answer',
       'block.followup',
+      'columns.describe',
       'comment.add',
       'config.get',
       'inbox.get',
@@ -692,6 +693,7 @@ describe('grants', () => {
     ],
     ['task.move', 'mutation', [operator], null, [...archived, 'move_not_allowed']],
     ['config.get', 'query', [operator, projectAgent], null, ['not_found']],
+    ['columns.describe', 'query', [operator, projectAgent], null, ['not_found']],
   ];
 
   it('declares the six grants', () => {
@@ -705,7 +707,7 @@ describe('grants', () => {
     ]);
   });
 
-  it('pins the 28 operations with kinds, grants, preconditions and errors', () => {
+  it('pins the 29 operations with kinds, grants, preconditions and errors', () => {
     const order = Object.keys(ERRORS);
     expect(
       OPERATIONS.map((op) => [op.id, op.kind, op.grants, op.preconditions, op.errors]),
@@ -726,7 +728,7 @@ describe('grants', () => {
         return [opId, kind, grants, preconditions, errors];
       }),
     );
-    expect(OPERATIONS).toHaveLength(28);
+    expect(OPERATIONS).toHaveLength(29);
   });
 
   it('names a branch of the input discriminator in every grant mode', () => {
@@ -837,6 +839,16 @@ describe('comment shape', () => {
 });
 
 describe('snapshot', () => {
+  it('adds columns.describe without changing any pre-existing operation, grant or error', async () => {
+    const baseline = catalogSnapshotBody(
+      OPERATIONS.filter((operation) => operation.id !== 'columns.describe'),
+    );
+    // Integration base 66092119: includes upstream config.get timing fields as well as every
+    // existing schema, example and transport binding. Original intake was efa72d3b.
+    expect(await catalogVersion(baseline)).toBe(
+      '407cd042fac141647a7b3bdac05235bf76d95bdf665debc0f06a572e50c67eae',
+    );
+  });
   const throwaway = (input: z.ZodObject, output: z.ZodType) =>
     defineOperation({
       id: 'test.op',

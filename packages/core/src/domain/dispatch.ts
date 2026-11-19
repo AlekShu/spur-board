@@ -120,7 +120,7 @@ const groupOf = (column: ColumnId) => COLUMNS.find((c) => c.id === column)?.grou
  * The next enabled column of the project right of `column`, if any. From a column of a group it
  * skips the rest of that group, so a task leaves the group in one move.
  */
-function nextColumn(project: GateProject, column: ColumnId): ColumnId | undefined {
+export function nextColumn(project: GateProject, column: ColumnId): ColumnId | undefined {
   const group = groupOf(column);
   return project.columns.find(
     (c) =>
@@ -147,6 +147,21 @@ function ticketFinished(input: DispatchInput): boolean {
 
 function absenceReady(input: DispatchInput): boolean {
   return ticketFinished(input) && input.allGithubReposReady && input.spurReady && !input.spurBlind;
+}
+
+/** Completion is separate from gate progression and can bypass every ordinary gate. */
+const COMPLETION_RULE = {
+  to: 'done' as const,
+  text: 'From any column other than Done, completion bypasses normal gates: an eligible linked merged PR with a done ticket, or a closed ticket with no open linked PR and no live worker after every configured repository and Spur have fresh, complete, non-blind observations since the task changed. These are alternative completion routes, not additional gate requirements. Neither route moves while GitHub is blind (including no fresh complete poll since startup) or a submit is pending.',
+  reason(pr: TaskGateFacts['pr'], input: DispatchInput): 'merged' | 'ticket_done_no_pr' | null {
+    if (pr?.state === 'merged') return 'merged';
+    return absenceReady(input) ? 'ticket_done_no_pr' : null;
+  },
+};
+
+/** The completion route shown by policy reads, beside rather than within normal exit gates. */
+export function describeCompletion() {
+  return { to: COMPLETION_RULE.to, text: COMPLETION_RULE.text };
 }
 
 /**
@@ -240,12 +255,9 @@ export function dispatch(input: DispatchInput): DispatchResult {
       const agent = executor === 'none' ? workerLive : executor !== 'operator';
       return result(agent ? { column, reasons: [], kind: 'wrap_up' } : null);
     }
-    if (merged) {
-      move('done', 'merged');
-      continue;
-    }
-    if (absenceReady(input)) {
-      move('done', 'ticket_done_no_pr');
+    const completion = COMPLETION_RULE.reason(facts.pr, input);
+    if (completion !== null) {
+      move(COMPLETION_RULE.to, completion);
       continue;
     }
     // The reopen hid the task's only PR, merged before it but seen merged later: To Do, as from Done.
