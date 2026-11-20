@@ -905,9 +905,10 @@ describe('snapshot', () => {
     // extends the task.history event kinds. #733 adds the review-rule gate reasons and condition
     // to task.get --why. The web Turn section then set web on inbox.ack, task.submit and
     // task.return; their schemas, grants and errors are unchanged. #738 adds the mirror move kind
-    // and reason, sources[].failure and the github-project service texts.
+    // and reason, sources[].failure and the github-project service texts. #755 adds
+    // tasks[].qaSubmission to status.get.
     expect(await catalogVersion(baseline)).toBe(
-      'e8f8e2ebf6901e17cd6a4e6ad8e860b44f1cdbad55e542f8a33bd1987388cb69',
+      'edde22604ecdf5af5f33eab2c39b258f6b64c5d952007120720906fcfdc7401f',
     );
   });
   const throwaway = (input: z.ZodObject, output: z.ZodType) =>
