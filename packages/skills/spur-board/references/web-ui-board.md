@@ -65,6 +65,8 @@ Columns follow configuration order:
   reads `manual` instead of the executor. The band's caret toggle folds the group into one
   column with a section per part (`empty` when it has no tasks) and unfolds it back into
   columns. The browser keeps the fold per project; a fold reads nothing from the daemon.
+- A Backlog card moves to another part of its band with a reason: see
+  [moving between Backlog parts](web-ui-board-move.md).
 - `done` lists every done task in a compact scrolling list, each with its time in the column.
 - A card opens the task view on click or Enter, a new tab on a modified click. It shows the short
   key (full key on hover) and its time in the column, the ticket title, then:
