@@ -958,7 +958,7 @@ describe('comment shape', () => {
 });
 
 describe('snapshot', () => {
-  it('pins the catalog excluding columns.describe after adding approval freshness', async () => {
+  it('pins the catalog excluding columns.describe after scoping project operators', async () => {
     const baseline = catalogSnapshotBody(
       OPERATIONS.filter((operation) => operation.id !== 'columns.describe'),
     );
@@ -972,9 +972,10 @@ describe('snapshot', () => {
     // tasks[].qaSubmission to status.get. #753 adds the optional approvals list to status.get
     // prSummary and task.get PR links. #737 adds task.order, tasks[].position, the
     // order_anchor_invalid code and the task_reordered kind; the task.order description
-    // names its one-placement and non-blank key rule.
+    // names its one-placement and non-blank key rule. #798 drops the other-project operator
+    // source from status.get bindings and rewords the inbox.operator description.
     expect(await catalogVersion(baseline)).toBe(
-      '71eed80ab701c6eb867ff07b3c50dd70fc341a2d6c72102a9529d5031f850d88',
+      '899b0afa90dfbf277c19b70f2d2d9b4249f6d3eb4a1ac0afaa0b894c5868b521',
     );
   });
   const throwaway = (input: z.ZodObject, output: z.ZodType) =>
