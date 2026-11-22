@@ -30,6 +30,12 @@ Service dots follow `status.get` health: green healthy, amber degraded, red fail
 - `unknown`, with a hollow dot, for a service with no health row, for all before the first status
   read, and for all but the daemon while the daemon does not answer.
 
+The **services** trigger shows its own dot when a host reading is at 80% used or more: amber, or
+red at 90%, for the worst of CPU, RAM and every disk volume. Its name and tooltip then read
+`services: <readings>`, each reading at that level joined by `·`, such as
+`services: disk / 91% used, 8.7 GiB free`. Below 80%, and while the daemon does not answer, it
+has no dot and reads `services`.
+
 The bar follows each `status` stream message, about every 30 s, and reads nothing itself.
 
 ## Services panel
@@ -66,3 +72,18 @@ focus returns to its opener, or services after a link.
 
 While open, header and columns are inert; the bar accepts pointer only (Tab stays in the panel).
 Narrow panels cover the bar. Opening and closing add history entries; Back after close reopens it.
+
+## Host resources
+
+The daemon samples the host every 30 s. A disk volume at 90% used or more in two samples in a row
+raises one operator item, and it reaches Slack through the feed like the other items:
+
+<!-- prettier-ignore-start -->
+| Kind | Condition | Action | Severity | Clears when | URL |
+| --- | --- | --- | --- | --- | --- |
+| `board_observation` `host-disk:<mount>` | a volume at 90% used or more in two samples in a row; the text reads `host disk <mount>: <n>% used, <x.y> GiB free` | check the task, then close the item | attention | a sample below 80%, or you close the item | none |
+<!-- prettier-ignore-end -->
+
+Between 80% and 90% an open item stays, and its inbox text follows the latest sample, while the
+Slack line keeps the percent it was raised with. A closed item stays closed until a sample below
+80% ends the episode. CPU and RAM never raise an item.
