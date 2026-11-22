@@ -6,10 +6,13 @@ import { ProblemError } from '../lib/api.ts';
 import type { BoardData, BoardSnapshot } from './data.ts';
 import { BoardUnavailableError } from './intents.ts';
 import { open } from './Card.tsx';
+import type { HelpRequest } from './ColumnHelp.tsx';
 import { openHref, shortKey } from './model.ts';
 import { age } from './task-model.ts';
 import styles from './InboxPanel.module.css';
 
+/** A no-session row's plain click: nothing until the board loads, then column help or task. */
+export type NoSessionClick = 'wait' | 'help' | 'task';
 type Inbox = NonNullable<BoardSnapshot['inbox']>;
 type Entry = Inbox['items'][number];
 type CloseIntent = ReturnType<BoardData['closeItemIntent']>;
@@ -87,6 +90,8 @@ export function InboxPanel({
   now,
   onClose,
   onOpen,
+  onColumnHelp,
+  noSessionClick,
   closeItem,
 }: {
   snapshot: BoardSnapshot;
@@ -95,6 +100,10 @@ export function InboxPanel({
   now: number;
   onClose: () => void;
   onOpen: (entry: Entry) => void;
+  /** A plain click on an active no-session row; the board decides between help and task. */
+  onColumnHelp: (request: HelpRequest) => void;
+  /** What a plain click on a no-session row of `project` and `column` does now. */
+  noSessionClick: (project: string, column: string) => NoSessionClick;
   closeItem: BoardData['closeItemIntent'];
 }) {
   const [selected, select] = useState('all');
@@ -304,6 +313,34 @@ export function InboxPanel({
     );
     const className = `${styles.row ?? ''} ${quiet} ${focusRing}`;
     const url = entry.url === undefined ? null : safeExternalUrl(entry.url);
+    // An active no-session row stays one task link from first render, so focus and the browser's
+    // link actions hold. Its plain click waits for the board to load, then opens the column's
+    // help, which links the oldest waiting turn, or the task when the column has no head.
+    const { task } = entry;
+    if (!handled && known !== undefined && task !== null) {
+      const click = noSessionClick(entry.project, known.column);
+      return (
+        <a
+          className={className}
+          href={openHref(task)}
+          aria-disabled={click === 'wait' || undefined}
+          aria-haspopup={click === 'help' ? 'dialog' : undefined}
+          data-inbox-id={entry.id}
+          onClick={(event) => {
+            open(event, task, () => {
+              onColumnHelp({
+                project: entry.project,
+                column: known.column,
+                task,
+                turn: known.oldest?.turn,
+              });
+            });
+          }}
+        >
+          {content}
+        </a>
+      );
+    }
     if (entry.task === null && url !== null)
       return (
         <a

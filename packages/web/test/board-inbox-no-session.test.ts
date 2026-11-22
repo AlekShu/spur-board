@@ -111,7 +111,8 @@ describe('inbox no-session item', () => {
     expect(row('I7').querySelector('[aria-hidden="true"]')).not.toBeNull();
   });
 
-  it('opens the oldest waiting turn task and keeps Close', async () => {
+  // The fixture's project a has no qa column, so the row has no column help and stays a link.
+  it('opens the oldest waiting turn task over the inbox when the column is not configured', async () => {
     const d = daemon();
     serveInbox(d, [open()]);
     await openInbox(d);
@@ -127,6 +128,8 @@ describe('inbox no-session item', () => {
     const dialogs = [...document.querySelectorAll('[role="dialog"]')];
     expect(dialogs).toHaveLength(2);
     expect(dialogs.at(-1)?.textContent).toContain('#7');
+    expect(location.search).toBe('?open=ex%2Frepo%237');
+    expect(history.state).toEqual({ inbox: true, project: 'a' });
   });
 
   it('leaves the active list when a stream re-read handles it', async () => {
@@ -163,6 +166,8 @@ describe('inbox no-session item', () => {
     await openInbox(d);
     expect(handledIds()).toEqual(['I7']);
     expect(lines('I7')).toEqual(['Had no session to ring for qa', PAST]);
+    expect(row('I7').tagName).toBe('A');
+    expect(row('I7').getAttribute('href')).toBe('?open=ex%2Frepo%237');
   });
 
   it('keeps the action on a handled generic row that is not a no-session item', async () => {
