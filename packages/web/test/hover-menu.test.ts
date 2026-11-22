@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, useRef, type ReactNode } from 'react';
+import { act, createElement, useRef, type ComponentType, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HoverMenu, Modal, SidePanel, type HoverMenuItem } from '../src/ds/index.ts';
@@ -30,7 +30,8 @@ afterEach(() => {
   container.remove();
 });
 
-function mount(props: { value?: Choice; defaultOpen?: boolean } = {}) {
+type MountProps = { value?: Choice; defaultOpen?: boolean; open?: boolean };
+function mount(props: MountProps & { onOpenChange?: (open: boolean) => void } = {}) {
   act(() => {
     root.render(
       createElement(HoverMenu<Choice>, { label: 'Theme', icon: 'moon', items, onSelect, ...props }),
@@ -242,6 +243,112 @@ describe('HoverMenu', () => {
     expect(isOpen()).toBe(true);
     click(trigger(), 1);
     expect(isOpen()).toBe(false);
+  });
+});
+
+const examples = import.meta.glob<Record<string, ComponentType>>(
+  '../src/ds/HoverMenu/HoverMenu.examples.tsx',
+  { eager: true },
+);
+
+describe('HoverMenu controlled', () => {
+  let onOpenChange: ReturnType<typeof vi.fn<(open: boolean) => void>>;
+  beforeEach(() => {
+    onOpenChange = vi.fn<(open: boolean) => void>();
+  });
+  const render = (open: boolean) => {
+    mount({ value: 'dark', open, onOpenChange, defaultOpen: !open });
+  };
+  /** Runs `step` and expects one `onOpenChange(next)` from it. */
+  const reports = (next: boolean, step: () => void) => {
+    onOpenChange.mockClear();
+    step();
+    expect(onOpenChange.mock.calls).toEqual([[next]]);
+  };
+
+  it('(n) controlled: reports each open and close and shows only what the parent passes', () => {
+    render(false);
+    expect(isOpen()).toBe(false);
+    reports(true, () => {
+      click(trigger(), 1);
+    });
+    reports(true, () => {
+      key(trigger(), 'ArrowDown');
+    });
+    reports(true, () => {
+      move('mouse', document.body, trigger());
+    });
+    expect(isOpen()).toBe(false);
+    render(true);
+    expect(isOpen()).toBe(true);
+    reports(false, () => {
+      click(option(2), 1);
+    });
+    expect(onSelect).toHaveBeenCalledWith('auto');
+    reports(false, () => {
+      key(option(0), 'Escape');
+    });
+    reports(false, () => {
+      key(option(0), 'Tab');
+    });
+    reports(false, () => {
+      fire(document.body, new PointerEvent('pointerdown', { bubbles: true }));
+    });
+    // Still open: only the parent closes it.
+    expect(isOpen()).toBe(true);
+    // A click pins it; the parent's close drops the pin, so a later hover-open closes on leave.
+    click(trigger(), 1);
+    render(false);
+    expect(isOpen()).toBe(false);
+    render(true);
+    reports(false, () => {
+      move('mouse', trigger(), document.body);
+    });
+  });
+
+  /** Renders the Controlled example and returns its two triggers. */
+  const controlledExample = () => {
+    const Controlled = Object.values(examples)[0]?.Controlled;
+    if (!Controlled) throw new Error('no Controlled example');
+    act(() => {
+      root.render(createElement(Controlled));
+    });
+    const [first, second] = [
+      ...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]'),
+    ];
+    if (!first || !second) throw new Error('no two triggers');
+    return [first, second] as const;
+  };
+
+  it('(o) the Controlled example keeps one of its two menus open', () => {
+    const [first, second] = controlledExample();
+    const menus = () => [...container.querySelectorAll('[role="menu"]')];
+    click(first, 1);
+    expect(menus()).toHaveLength(1);
+    expect(first.getAttribute('aria-expanded')).toBe('true');
+    click(second, 1);
+    expect(menus().map((found) => found.id)).toEqual([second.getAttribute('aria-controls')]);
+    expect(first.getAttribute('aria-expanded')).toBe('false');
+    move('mouse', document.body, first);
+    expect(first.getAttribute('aria-expanded')).toBe('true');
+    expect(second.getAttribute('aria-expanded')).toBe('false');
+    expect(menus()).toHaveLength(1);
+  });
+
+  it.each([
+    { path: 'the Controlled example opened by ArrowDown, then a hover on the other', open: 'key' },
+    { path: 'the Controlled example opened by click, then a hover on the other', open: 'click' },
+    { path: 'a menu its parent closes', open: 'parent' },
+  ] as const)('(p) $path: focus inside moves to the closed menu trigger', ({ open }) => {
+    if (open === 'parent') render(true);
+    const [first, second] = open === 'parent' ? [trigger(), undefined] : controlledExample();
+    if (open === 'click') click(first, 1);
+    else key(first, 'ArrowDown');
+    expect(menu()?.contains(document.activeElement)).toBe(true);
+    if (second) move('mouse', document.body, second);
+    else render(false);
+    expect(isOpen()).toBe(open !== 'parent');
+    expect(document.activeElement).toBe(first);
   });
 });
 

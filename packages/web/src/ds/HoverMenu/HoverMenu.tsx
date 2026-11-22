@@ -1,7 +1,9 @@
 import {
   Fragment,
   useEffect,
+  useEffectEvent,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
@@ -109,6 +111,20 @@ export function removeOpenMenu(entry: OpenMenu): void {
  *   first. An Escape already handled (`defaultPrevented`) or composing closes no menu.
  *
  * `defaultOpen` renders it open and pinned on mount without moving focus.
+ *
+ * Controlled: with `open` given, the parent owns the open state and `defaultOpen` is ignored.
+ * Every open or close the menu would make (hover enter and leave, click, ArrowDown, an item,
+ * Tab, Escape, a pointer down outside) calls `onOpenChange` instead, only on a real change, and
+ * shows only once the parent passes the new `open`; `onOpenChange` also reports changes in the
+ * uncontrolled mode. Each open request sets its own intent: a hover opens unpinned without
+ * moving focus, a click or ArrowDown pinned with focus on the checked item. A request the parent
+ * declines (`open` stays false) and any close, a parent's included, drop that intent, so a later
+ * hover-open closes on leave. Escape and a pointer down outside report through the current
+ * `onOpenChange`, also one passed while the menu is open.
+ *
+ * Any close, a parent's included, that drops focus from inside the menu (focus then on nothing,
+ * `body` or a removed node) moves it to the trigger; a menu opened by click or key in the same
+ * update still moves it on to its checked item.
  */
 export function HoverMenu<V extends string>({
   label,
@@ -121,17 +137,29 @@ export function HoverMenu<V extends string>({
   opens = 'up',
   variant = 'choice',
   note,
+  open: controlled,
+  onOpenChange,
 }: {
   label: string;
   items: readonly HoverMenuItem<V>[];
   onSelect: (value: V) => void;
   defaultOpen?: boolean;
+  /** Controlled open state; the menu then reports every change through `onOpenChange`. */
+  open?: boolean | undefined;
+  onOpenChange?: ((open: boolean) => void) | undefined;
   opens?: 'up' | 'down';
   note?: string | undefined;
 } & ({ icon: IconName; text?: undefined } | { text: string; icon?: undefined }) &
   ({ variant?: 'choice'; value?: V | undefined } | { variant: 'action'; value?: undefined })) {
-  const [open, setOpen] = useState(defaultOpen);
-  const pinned = useRef(defaultOpen);
+  const [inner, setInner] = useState(defaultOpen);
+  const open = controlled ?? inner;
+  // Every internal open and close: the parent decides when it owns the state.
+  const setOpen = (next: boolean) => {
+    if (next === open) return;
+    if (controlled === undefined) setInner(next);
+    onOpenChange?.(next);
+  };
+  const pinned = useRef(controlled === undefined && defaultOpen);
   const focusOnOpen = useRef(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -145,8 +173,18 @@ export function HoverMenu<V extends string>({
       current?.querySelector<HTMLElement>(itemSelector)
     )?.focus();
   };
+  // Counts open requests: each renders, so the effect below sees a request the parent declined.
+  const [request, setRequest] = useState(0);
+  // Each open request sets the whole intent: a hover neither pins nor moves focus.
+  const requestOpen = (pin: boolean) => {
+    pinned.current = pin;
+    focusOnOpen.current = pin;
+    setRequest((count) => count + 1);
+    setOpen(true);
+  };
   const close = () => {
     pinned.current = false;
+    focusOnOpen.current = false;
     setOpen(false);
   };
   const closeToTrigger = () => {
@@ -154,30 +192,48 @@ export function HoverMenu<V extends string>({
     trigger.current?.focus();
   };
   const openPinned = () => {
-    pinned.current = true;
-    if (open) focusChecked();
-    else {
-      focusOnOpen.current = true;
-      setOpen(true);
+    if (!open) {
+      requestOpen(true);
+      return;
     }
+    pinned.current = true;
+    focusChecked();
   };
+  // Listeners added while open close through the latest render's `onOpenChange`.
+  const dismiss = useEffectEvent((toTrigger: boolean) => {
+    if (toTrigger) closeToTrigger();
+    else close();
+  });
+  // Whether the last focus inside the root was in the menu.
+  const focusInMenu = useRef(false);
+  // Before the passive effects: a menu opened by click or key moves focus on after this.
+  useLayoutEffect(() => {
+    if (open) return;
+    const active = document.activeElement;
+    if (focusInMenu.current && (active === null || active === document.body || !active.isConnected))
+      trigger.current?.focus({ preventScroll: true });
+    focusInMenu.current = false;
+  }, [open]);
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      // A parent close skips `close`: no pin or pending focus outlives it.
+      pinned.current = false;
+      focusOnOpen.current = false;
+      return;
+    }
     if (focusOnOpen.current) {
       focusOnOpen.current = false;
       focusChecked();
     }
     const outside = (event: globalThis.PointerEvent) => {
-      if (event.target instanceof Node && !root.current?.contains(event.target)) close();
+      if (event.target instanceof Node && !root.current?.contains(event.target)) dismiss(false);
     };
     const element = root.current;
     const entry: OpenMenu | undefined = element
       ? {
           root: element,
           escape: () => {
-            const inside = element.contains(document.activeElement);
-            close();
-            if (inside) trigger.current?.focus();
+            dismiss(element.contains(document.activeElement));
           },
         }
       : undefined;
@@ -188,6 +244,12 @@ export function HoverMenu<V extends string>({
       if (entry) removeOpenMenu(entry);
     };
   }, [open]);
+  useEffect(() => {
+    // A request the parent declined (still closed after it) leaves no pin or pending focus.
+    if (open) return;
+    pinned.current = false;
+    focusOnOpen.current = false;
+  }, [request]);
   const menuKey = (event: KeyboardEvent<HTMLDivElement>) => {
     const options = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(itemSelector)];
     const current = options.findIndex((option) => option === document.activeElement);
@@ -207,8 +269,11 @@ export function HoverMenu<V extends string>({
       className={styles.root}
       ref={root}
       data-opens={opens === 'down' ? 'down' : undefined}
+      onFocus={(event) => {
+        focusInMenu.current = menu.current?.contains(event.target) ?? false;
+      }}
       onPointerEnter={(event: PointerEvent<HTMLDivElement>) => {
-        if (event.pointerType !== 'touch' && !open) setOpen(true);
+        if (event.pointerType !== 'touch' && !open) requestOpen(false);
       }}
       onPointerLeave={() => {
         if (open && !pinned.current) close();
