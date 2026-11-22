@@ -19,6 +19,7 @@ import type { z } from 'zod';
 import type { Store } from '../store/store.ts';
 import type { ApprovalView } from './approval-watch.ts';
 import { eventActor, parseDefaultBranch, projectForSource } from './board-utils.ts';
+import { earliestTime } from './doorbells.ts';
 import { turnWaitView } from './turn-waits.ts';
 
 /** The column groups with their built-in columns in canonical order, the same for every project. */
@@ -304,6 +305,79 @@ export function counts(values: readonly string[], order: readonly string[]): str
 /** Session facts rendered in status detail. */
 export function sessionView(fact: SessionFacts) {
   return { ...fact, links: Object.entries(fact.links).map(([label, url]) => ({ label, url })) };
+}
+
+type UnlinkedSessionState = z.output<
+  typeof statusOutputSchema
+>['unlinkedSessions'][number]['state'];
+
+/** Lifecycles after which Spur's session is over, even while Spur still lists it. */
+const TERMINAL_LIFECYCLES: readonly string[] = ['completed', 'killed', 'errored'];
+
+/**
+ * Whether an unlinked session is live, ended or gone from Spur's list, and since when. Ended wins
+ * over absent; a session ended at the earlier of its finish and end times, and a listed completed,
+ * killed or errored session ended when it finished.
+ */
+function unlinkedSessionState(session: Row<'session_snapshot'>): {
+  state: UnlinkedSessionState;
+  since: string | null;
+} {
+  if (session.ended_at !== null) {
+    // A later lookup can stamp ended_at polls after Spur listed the session finished.
+    return {
+      state: 'ended',
+      since: earliestTime([session.finished_at, session.ended_at]) ?? session.ended_at,
+    };
+  }
+  if (TERMINAL_LIFECYCLES.includes(session.state)) {
+    return { state: 'ended', since: session.finished_at ?? session.last_seen };
+  }
+  if (session.absent_since !== null) return { state: 'absent', since: session.absent_since };
+  return { state: 'live', since: null };
+}
+
+/**
+ * An unlinked session row: ended and absent ones leave out health and their last live lifecycle;
+ * in detail they keep a terminal lifecycle, which tells completion from kill or error.
+ */
+export function unlinkedSessionView(
+  session: Row<'session_snapshot'>,
+  facts: SessionFacts,
+  detail: boolean,
+) {
+  const shown = unlinkedSessionState(session);
+  const live = shown.state === 'live';
+  if (detail) {
+    const view = sessionView(facts);
+    if (live) return { ...view, ...shown };
+    const { id, spurProject, branch, pr, links, lastActivityAt } = view;
+    const rings = view.queuedRings === undefined ? {} : { queuedRings: view.queuedRings };
+    const terminal = TERMINAL_LIFECYCLES.includes(session.state)
+      ? { lifecycle: view.lifecycle }
+      : {};
+    // Spur lists a completed or killed session without an end time: its state tells the outcome.
+    const finished = session.state === 'completed' || session.state === 'killed';
+    const { endedAt, endReason }: Pick<SessionFacts, 'endedAt' | 'endReason'> =
+      view.endReason === null && finished
+        ? { endedAt: shown.since, endReason: session.state === 'completed' ? 'complete' : 'kill' }
+        : view;
+    return {
+      id,
+      spurProject,
+      branch,
+      pr,
+      links,
+      ...terminal,
+      lastActivityAt,
+      endedAt,
+      endReason,
+      ...rings,
+      ...shown,
+    };
+  }
+  const { id, spurProject, branch, lifecycle, health } = facts;
+  return { id, spurProject, branch, ...shown, ...(live ? { lifecycle, health } : {}) };
 }
 
 /** Order group visits in their own slots, preserving non-group relative ordering. */

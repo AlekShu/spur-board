@@ -1487,7 +1487,9 @@ it('keeps the default status for 100 tasks under the budget and lists every item
     'health',
     'id',
     'lifecycle',
+    'since',
     'spurProject',
+    'state',
   ]);
 
   const detail = await query(status, { detail: true }, 'operator');
@@ -1715,6 +1717,23 @@ it('hides unlinked PRs and sessions finished over 7 days ago and counts them', a
     expect(result.hiddenUnlinkedSessions).toBe(200);
     const task = result.tasks.find((row) => row.key === 'o/first#1');
     expect([task?.prCount, task?.sessionCount]).toEqual([1, 1]);
+    const row = (id: string) => result.unlinkedSessions.find((session) => session.id === id);
+    const sixDaysAgo = new Date(clock.now() - 6 * DAY).toISOString();
+    expect(row('live-old')).toMatchObject({
+      state: 'live',
+      since: null,
+      lifecycle: 'running',
+      health: 'working',
+    });
+    if (detail) expect(row('live-old')).toHaveProperty('healthSince');
+    expect(row('ended-6d')).toMatchObject({ state: 'ended', since: sixDaysAgo });
+    expect(row('gone-6d')).toMatchObject({ state: 'absent', since: sixDaysAgo });
+    expect(row('gone-late')).toMatchObject({ state: 'absent', since: sixDaysAgo });
+    for (const id of ['ended-6d', 'gone-6d', 'gone-late']) {
+      for (const key of ['lifecycle', 'health', 'healthSince', 'rateLimitResetAt']) {
+        expect(row(id)).not.toHaveProperty(key);
+      }
+    }
   }
   const all = await status({});
   expect(all.unlinkedSessions.map((session) => session.id).sort()).toEqual(listedSessions);
@@ -1731,6 +1750,201 @@ it('hides no session as gone from the list until a complete Spur poll omits it',
   expect(ids).not.toContain('completed-0');
   expect(ids).not.toContain('ended-0');
   expect(result.hiddenUnlinkedSessions).toBe(150);
+  expect(result.unlinkedSessions.find((session) => session.id === 'gone-0')?.state).toBe('live');
+});
+
+it('shows unlinked sessions in a terminal lifecycle as ended and keeps the lifecycle in detail', async () => {
+  const store = openTempStore('board-registry-').store;
+  stores.push(store);
+  const status = await seedUnlinkedAges(store, true);
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const now = clock.now();
+  type Lifecycle = 'completed' | 'killed' | 'errored' | 'running';
+  interface Case {
+    id: string;
+    lifecycle: Lifecycle;
+    finishedAt: string | null;
+    lastSeen: string;
+    endedAt: string | null;
+    absentSince: string | null;
+    rateLimited: boolean;
+    state: 'live' | 'ended' | 'absent';
+    since: string | null;
+    /** Lifecycle in detail rows; null when left out. */
+    detailLifecycle: Lifecycle | null;
+    /** endReason and endedAt of non-live detail rows. */
+    end: { endReason: string | null; endedAt: string | null } | null;
+  }
+  const vanished = { endedAt: iso(now - DAY), absentSince: null };
+  const listed = { endedAt: null, absentSince: null };
+  const cases: Case[] = [
+    // Listed by Spur without an end time: ended since it finished, else since last seen.
+    {
+      id: 'done-1',
+      lifecycle: 'completed',
+      finishedAt: iso(now - DAY),
+      lastSeen: iso(now),
+      ...listed,
+      rateLimited: true,
+      state: 'ended',
+      since: iso(now - DAY),
+      detailLifecycle: 'completed',
+      end: { endReason: 'complete', endedAt: iso(now - DAY) },
+    },
+    {
+      id: 'killed-1',
+      lifecycle: 'killed',
+      finishedAt: null,
+      lastSeen: iso(now - 2 * DAY),
+      ...listed,
+      rateLimited: false,
+      state: 'ended',
+      since: iso(now - 2 * DAY),
+      detailLifecycle: 'killed',
+      end: { endReason: 'kill', endedAt: iso(now - 2 * DAY) },
+    },
+    // Finished and last seen 10 days ago, still listed: ended, yet the hide rule keeps it shown.
+    {
+      id: 'errored-1',
+      lifecycle: 'errored',
+      finishedAt: iso(now - 10 * DAY),
+      lastSeen: iso(now - 10 * DAY),
+      ...listed,
+      rateLimited: false,
+      state: 'ended',
+      since: iso(now - 10 * DAY),
+      detailLifecycle: 'errored',
+      end: { endReason: null, endedAt: null },
+    },
+    // A later lookup got 404: ended since it finished, the stored end time and reason stay.
+    ...(['completed', 'killed', 'errored'] as const).map((lifecycle): Case => ({
+      id: `vanished-${lifecycle}`,
+      lifecycle,
+      finishedAt: iso(now - 2 * DAY),
+      lastSeen: iso(now - DAY),
+      ...vanished,
+      rateLimited: false,
+      state: 'ended',
+      since: iso(now - 2 * DAY),
+      detailLifecycle: lifecycle,
+      end: { endReason: 'vanished', endedAt: iso(now - DAY) },
+    })),
+    // Listed completed days before the 404: the old finish is not read as recent.
+    {
+      id: 'vanished-late',
+      lifecycle: 'completed',
+      finishedAt: iso(now - 5 * DAY),
+      lastSeen: iso(now - 5 * DAY),
+      ...vanished,
+      rateLimited: false,
+      state: 'ended',
+      since: iso(now - 5 * DAY),
+      detailLifecycle: 'completed',
+      end: { endReason: 'vanished', endedAt: iso(now - DAY) },
+    },
+    // Vanished with no finish time: ended since the end time.
+    {
+      id: 'vanished-unfinished',
+      lifecycle: 'running',
+      finishedAt: null,
+      lastSeen: iso(now - 2 * DAY),
+      ...vanished,
+      rateLimited: false,
+      state: 'ended',
+      since: iso(now - DAY),
+      detailLifecycle: null,
+      end: { endReason: 'vanished', endedAt: iso(now - DAY) },
+    },
+    {
+      id: 'running-live',
+      lifecycle: 'running',
+      finishedAt: null,
+      lastSeen: iso(now),
+      ...listed,
+      rateLimited: false,
+      state: 'live',
+      since: null,
+      detailLifecycle: 'running',
+      end: null,
+    },
+    {
+      id: 'running-absent',
+      lifecycle: 'running',
+      finishedAt: null,
+      lastSeen: iso(now - DAY),
+      endedAt: null,
+      absentSince: iso(now - DAY),
+      rateLimited: false,
+      state: 'absent',
+      since: iso(now - DAY),
+      detailLifecycle: null,
+      end: { endReason: null, endedAt: null },
+    },
+  ];
+  await store.db
+    .insertInto('session_snapshot')
+    .values(
+      cases.map((row) => ({
+        id: row.id,
+        spur_project: 'first-worker',
+        branch: `worker/${row.id}`,
+        pr: null,
+        raw_state: row.lifecycle,
+        state: row.lifecycle,
+        first_seen: iso(now - 3 * DAY),
+        last_seen: row.lastSeen,
+        ended_at: row.endedAt,
+        end_reason: row.endedAt === null ? null : ('vanished' as const),
+        detail: JSON.stringify({
+          id: row.id,
+          spurProject: 'first-worker',
+          branch: `worker/${row.id}`,
+          pr: null,
+          links: {},
+          lifecycle: row.lifecycle,
+          health: row.rateLimited ? 'rate_limited' : 'working',
+          healthSince: iso(now - 3 * DAY),
+          ...(row.rateLimited ? { rateLimitResetAt: iso(now + 60 * 60 * 1000) } : {}),
+          lastActivityAt: null,
+          endedAt: row.endedAt,
+          endReason: row.endedAt === null ? null : 'vanished',
+        }),
+        source: 'spur',
+        observed_at: iso(now),
+        absent_since: row.absentSince,
+        finished_at: row.finishedAt,
+      })),
+    )
+    .execute();
+  for (const detail of [false, true]) {
+    const result = await status({ project: 'first', detail });
+    expect(result.hiddenUnlinkedSessions).toBe(200);
+    for (const expected of cases) {
+      const row = result.unlinkedSessions.find((session) => session.id === expected.id);
+      const label = `${expected.id} detail=${String(detail)}`;
+      expect(row, `${label} listed`).toBeDefined();
+      expect(row, label).toMatchObject({ state: expected.state, since: expected.since });
+      if (expected.state === 'live') {
+        expect(row, label).toMatchObject({ lifecycle: expected.lifecycle, health: 'working' });
+        if (detail) expect(row, label).toHaveProperty('healthSince');
+        continue;
+      }
+      for (const key of ['health', 'healthSince', 'rateLimitResetAt']) {
+        expect(row, label).not.toHaveProperty(key);
+      }
+      if (detail && expected.detailLifecycle !== null) {
+        expect(row?.lifecycle, label).toBe(expected.detailLifecycle);
+      } else {
+        expect(row, label).not.toHaveProperty('lifecycle');
+      }
+      if (detail) {
+        expect(row, label).toMatchObject(expected.end ?? {});
+      } else {
+        expect(row, label).not.toHaveProperty('endReason');
+        expect(row, label).not.toHaveProperty('endedAt');
+      }
+    }
+  }
 });
 
 it('reports the effective bindings of the projects a caller may see', async () => {

@@ -1002,8 +1002,11 @@ describe('snapshot', () => {
     // guidance and its reason field: wait only on what the Board cannot see, not on what it watches,
     // unless your own next step needs the watched fact, and names mergeability. #771 adds the
     // optional noSession fields to inbox.operator entries and a no-session item to its example.
+    // #799 adds state and since to status.get unlinkedSessions, and leaves lifecycle, health,
+    // healthSince and rateLimitResetAt out of ended and absent ones, keeping a terminal lifecycle
+    // in detail and counting a listed errored one as ended.
     expect(await catalogVersion(baseline)).toBe(
-      'f2e3f0681fcf9e0d188db25e57ed0c94761a3c4ceccf6a2ae3fb43e856088c66',
+      'b28f41219f78966ffb760962f0cb2094228f5ed9a710155ad1e89a1d630da2ef',
     );
   });
   const throwaway = (input: z.ZodObject, output: z.ZodType) =>

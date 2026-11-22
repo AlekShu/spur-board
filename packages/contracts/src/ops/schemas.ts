@@ -439,16 +439,34 @@ export const statusUnlinkedPrSchema = prFactsSchema
   })
   .describe('A pull request without a task link; fields beyond its identity need detail.');
 
+/** Whether an unlinked session row is still in Spur's list, ended, or gone from the list. */
+const UNLINKED_SESSION_STATES = ['live', 'ended', 'absent'] as const;
+
 export const statusUnlinkedSessionSchema = statusSessionFactsSchema
   .partial({
     pr: true,
     links: true,
+    lifecycle: true,
+    health: true,
     healthSince: true,
     lastActivityAt: true,
     endedAt: true,
     endReason: true,
   })
-  .describe('A session without a task link; fields beyond its identity need detail.');
+  .extend({
+    state: z
+      .enum(UNLINKED_SESSION_STATES)
+      .describe(
+        'live while listed by Spur; ended once it ended, vanished, or Spur lists it completed, killed or errored; absent once a complete Spur poll left it out of the list.',
+      ),
+    since: z.iso
+      .datetime()
+      .nullable()
+      .describe('When the session ended or left the list, ISO 8601 UTC; null while live.'),
+  })
+  .describe(
+    'A session without a task link. Compact rows carry id, spurProject, branch, state and since, plus lifecycle and health while live. Detail rows add the other session facts; ended and absent rows keep a completed, killed or errored lifecycle but leave out health, healthSince and rateLimitResetAt.',
+  );
 
 export const statusItemSchema = itemViewSchema
   .extend({
