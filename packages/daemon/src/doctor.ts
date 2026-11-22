@@ -13,6 +13,7 @@ import {
   DOCTOR_FIX_MAX,
   MIRROR_FAILURES,
   SLACK_BOT_SCOPES,
+  SPUR_MIN_VERSION,
   apiBaseUrl,
   approvalRuleOf,
   configBindings,
@@ -44,6 +45,10 @@ const SPUR_SEND_UNREACHABLE_FIX =
   'Start Spur or correct adapters.spur.baseUrl in config.yaml, then restart the service; the daemon sends doorbells to that Spur API.';
 const SPUR_SEND_FIX =
   'The Spur API at adapters.spur.baseUrl did not accept a doorbell send; update Spur or point adapters.spur.baseUrl at the Spur daemon.';
+const SPUR_VERSION_UNREAD_FIX = `Could not read a Spur release version from GET /info at adapters.spur.baseUrl. Start Spur, or make sure the running Spur daemon is ${SPUR_MIN_VERSION} or newer: upgrade Spur if needed, restart the Spur daemon, then rerun board doctor.`;
+// A Spur release, or the `git describe` form of a source checkout, which counts as its base tag.
+const SPUR_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-\d+-g[0-9a-f]+)?$/;
+const spurInfoWire = z.object({ version: z.string().max(64) });
 const GITHUB_FIX = 'Check the GitHub token and repository access.';
 const GITHUB_CHECKS_FIX =
   'Use a classic GitHub personal access token with the repo scope, authorized for organization SSO where required, to read check runs.';
@@ -742,6 +747,53 @@ async function operatorTokensCheck(ctx: ModuleContext<Store>, config: Config): P
     : warning('operator.tokens', line);
 }
 
+function spurVersionParts(version: string): number[] | null {
+  const parts = SPUR_VERSION.exec(version);
+  return parts === null ? null : parts.slice(1, 4).map(Number);
+}
+
+/** `spur.version` from the version the running Spur daemon reports, or null when unread. */
+function spurVersionCheck(version: string | null): Check {
+  const id = 'spur.version';
+  const parts = version === null ? null : spurVersionParts(version);
+  const min = spurVersionParts(SPUR_MIN_VERSION);
+  if (version === null || parts === null || min === null)
+    return warning(id, SPUR_VERSION_UNREAD_FIX);
+  const order = parts.map((part, index) => part - (min[index] ?? 0)).find((diff) => diff !== 0);
+  return check(
+    id,
+    (order ?? 0) >= 0,
+    `Spur ${version} is running, older than ${SPUR_MIN_VERSION}, the oldest Spur the Board supports; upgrade Spur to ${SPUR_MIN_VERSION} or newer, restart the Spur daemon, then rerun board doctor.`,
+  );
+}
+
+// Only the validated version leaves this call: /info also names local paths.
+function readSpurVersion(
+  ctx: ModuleContext<Store>,
+  fetcher: typeof fetch,
+  deadlineMs: number,
+  baseUrl: string,
+): Promise<string | null> {
+  return deadlineCall(
+    ctx,
+    deadlineMs,
+    'doctor.spur.version',
+    'Spur version read failed',
+    async (signal) => {
+      const response = await fetcher(new URL('info', apiBaseUrl(baseUrl)), {
+        method: 'GET',
+        signal,
+      });
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return null;
+      }
+      const parsed = spurInfoWire.safeParse(await response.json());
+      return parsed.success ? parsed.data.version : null;
+    },
+  );
+}
+
 async function request(
   ctx: ModuleContext<Store>,
   fetcher: typeof fetch,
@@ -899,6 +951,8 @@ export async function runDaemonDoctor(
   const { config, secrets } = ctx;
   const checks: Check[] = [];
   const spurUi = spurUiCheck(ctx, fetcher, deadlineMs);
+  // Started first and awaited last, so a slow /info overlaps every other probe.
+  const spurVersion = readSpurVersion(ctx, fetcher, deadlineMs, config.adapters.spur.baseUrl);
   if (config.web.port !== undefined)
     checks.push(
       webListening?.() === true
@@ -971,25 +1025,31 @@ export async function runDaemonDoctor(
     SPUR_PROBE_SESSION,
     'spur-board doctor probe',
   );
-  const [spur, spurSend] = await Promise.all([
+  // Each probe reads its own answer as it arrives, so no body read waits on another probe.
+  const [spurOk, spurSend] = await Promise.all([
     request(
       ctx,
       fetcher,
       deadlineMs,
       'spur',
       new URL('sessions', apiBaseUrl(config.adapters.spur.baseUrl)),
-    ),
-    request(ctx, fetcher, deadlineMs, 'spur.send', probe.url, probe.init),
+    ).then((response) => response?.ok === true),
+    request(ctx, fetcher, deadlineMs, 'spur.send', probe.url, probe.init).then(async (response) => {
+      if (response === null) return { reachable: false, ok: false };
+      if (response.status !== 404) {
+        await response.body?.cancel().catch(() => undefined);
+        return { reachable: true, ok: false };
+      }
+      const error = await spurErrorText(response);
+      return { reachable: true, ok: error?.startsWith('Session not found') ?? false };
+    }),
   ]);
-  checks.push(check('spur.api', spur?.ok === true, 'Start or correct the configured Spur API.'));
-  const spurSendOk =
-    spurSend?.status === 404 &&
-    ((await spurErrorText(spurSend))?.startsWith('Session not found') ?? false);
-  if (spurSend !== null && spurSend.status !== 404)
-    await spurSend.body?.cancel().catch(() => undefined);
+  checks.push(check('spur.api', spurOk, 'Start or correct the configured Spur API.'));
   checks.push(
-    check('spur.send', spurSendOk, spurSend === null ? SPUR_SEND_UNREACHABLE_FIX : SPUR_SEND_FIX),
+    check('spur.send', spurSend.ok, spurSend.reachable ? SPUR_SEND_FIX : SPUR_SEND_UNREACHABLE_FIX),
   );
+  // Awaited last, so a slow /info delays no other check; it keeps its place after spur.send.
+  const spurVersionAt = checks.length;
 
   if (!slackConfigured) {
     checks.push(
@@ -1119,5 +1179,6 @@ export async function runDaemonDoctor(
   checks.push(curatorSessionsCheck(await curatorSessions(ctx.store.db, config)));
   checks.push(orchestratorSessionsCheck(await orchestratorSessions(ctx.store.db, config)));
   checks.push(await spurUi);
+  checks.splice(spurVersionAt, 0, spurVersionCheck(await spurVersion));
   return { version: productVersion, checks };
 }

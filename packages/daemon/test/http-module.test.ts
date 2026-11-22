@@ -11,9 +11,11 @@ import {
 import {
   DOCTOR_FIX_MAX,
   MIRROR_FAILURES,
+  SPUR_MIN_VERSION,
   configSchema,
   doctorReportSchema,
   type ConfigInput,
+  type DoctorCheck,
 } from '@spur-board/contracts';
 import {
   createOperationRegistry,
@@ -323,9 +325,53 @@ function doctorFetch(fail?: string, prs: readonly unknown[] = []): typeof fetch 
         return Promise.resolve(Response.json({ error: 'Daemon is starting' }, { status: 503 }));
       if (fail === 'spur.send.ok')
         return Promise.resolve(Response.json({ id: 'spur-board-doctor-probe' }));
+      // Like a real fetch body, it errors when read after the request signal aborts.
+      const signal = init.signal;
+      const text = JSON.stringify({ error: 'Session not found: spur-board-doctor-probe' });
       return Promise.resolve(
-        Response.json({ error: 'Session not found: spur-board-doctor-probe' }, { status: 404 }),
+        new Response(
+          new ReadableStream(
+            {
+              pull(controller) {
+                if (signal?.aborted === true) {
+                  controller.error(signal.reason);
+                  return;
+                }
+                controller.enqueue(new TextEncoder().encode(text));
+                controller.close();
+              },
+            },
+            { highWaterMark: 0 },
+          ),
+          { status: 404, headers: { 'content-type': 'application/json' } },
+        ),
       );
+    }
+    if (path.endsWith('/info')) {
+      expect(init?.method).toBe('GET');
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      expect(init?.body).toBeUndefined();
+      if (fail === 'spur.version.reject') return Promise.reject(new TypeError('fetch failed'));
+      if (fail === 'spur.version.stalled-fetch')
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new Error('aborted'));
+          });
+        });
+      if (fail === 'spur.version.stalled-body')
+        return Promise.resolve(new Response(new ReadableStream({ start() {} })));
+      if (fail === 'spur.version.404')
+        return Promise.resolve(Response.json({ error: 'Route not found' }, { status: 404 }));
+      if (fail === 'spur.version.503')
+        return Promise.resolve(Response.json({ error: 'Daemon is starting' }, { status: 503 }));
+      if (fail === 'spur.version.nonjson')
+        return Promise.resolve(new Response('/info-secret-canary is not JSON'));
+      const canary = { ok: true, dataDir: '/info-secret-canary' };
+      if (fail === 'spur.version.missing') return Promise.resolve(Response.json(canary));
+      const version = fail?.startsWith('spur.version:')
+        ? fail.slice('spur.version:'.length)
+        : SPUR_MIN_VERSION;
+      return Promise.resolve(Response.json({ ...canary, version }));
     }
     if (path.endsWith('/sessions'))
       return Promise.resolve(new Response(null, { status: fail === 'spur.api' ? 503 : 200 }));
@@ -684,7 +730,7 @@ describe('daemon doctor checks', () => {
       blocking: false,
       fix: null,
     });
-    expect(fetcher).toHaveBeenCalledTimes(6);
+    expect(fetcher).toHaveBeenCalledTimes(7);
   });
 
   it.each([
@@ -791,6 +837,7 @@ describe('daemon doctor checks', () => {
       'link.rules',
       'spur.api',
       'spur.send',
+      'spur.version',
       'slack.configured',
       'operator.path',
       'operator.tokens',
@@ -805,7 +852,7 @@ describe('daemon doctor checks', () => {
       fix: 'Slack is not configured: questions addressed to you are only visible through board inbox. Run the spur-board-setup skill to configure slack.channels.',
     });
     expect(report.checks.every((check) => !check.blocking)).toBe(true);
-    expect(fetcher).toHaveBeenCalledTimes(6);
+    expect(fetcher).toHaveBeenCalledTimes(7);
   });
 
   it('fails with the missing bot scope when the token is valid', async () => {
@@ -841,7 +888,7 @@ describe('daemon doctor checks', () => {
     expect(report.checks.filter((check) => check.id.startsWith('slack.'))).toEqual([
       expect.objectContaining({ id: 'slack.configured', status: 'warning', blocking: false }),
     ]);
-    expect(fetcher).toHaveBeenCalledTimes(6);
+    expect(fetcher).toHaveBeenCalledTimes(7);
   });
 
   it('reports every daemon-owned check as passing without returning credential values', async () => {
@@ -861,6 +908,7 @@ describe('daemon doctor checks', () => {
       'link.rules',
       'spur.api',
       'spur.send',
+      'spur.version',
       'slack.auth',
       'slack.orchestrators_member',
       'slack.feed_member',
@@ -941,6 +989,156 @@ describe('daemon doctor checks', () => {
       );
     },
   );
+
+  const spurVersionUnread = `Could not read a Spur release version from GET /info at adapters.spur.baseUrl. Start Spur, or make sure the running Spur daemon is ${SPUR_MIN_VERSION} or newer: upgrade Spur if needed, restart the Spur daemon, then rerun board doctor.`;
+  const spurVersionLow = (version: string): string =>
+    `Spur ${version} is running, older than ${SPUR_MIN_VERSION}, the oldest Spur the Board supports; upgrade Spur to ${SPUR_MIN_VERSION} or newer, restart the Spur daemon, then rerun board doctor.`;
+
+  type SpurVersionCase = [mode: string, expected: Omit<DoctorCheck, 'id'>];
+  const spurVersionCases: SpurVersionCase[] = [
+    ...['1.52.9', '1.9.0', '1.52.0-4-g1a2b3c4'].map((version): SpurVersionCase => [
+      `spur.version:${version}`,
+      { status: 'fail', blocking: true, fix: spurVersionLow(version) },
+    ]),
+    ...[SPUR_MIN_VERSION, '1.100.0', '1.62.3', '2.0.0', '1.53.0-4-g1a2b3c4'].map(
+      (version): SpurVersionCase => [
+        `spur.version:${version}`,
+        { status: 'pass', blocking: false, fix: null },
+      ],
+    ),
+    ...[
+      'spur.version:0.0.0-dev',
+      'spur.version:e83647d75',
+      'spur.version:v1.53.0',
+      'spur.version:1.53',
+      'spur.version.missing',
+      'spur.version.nonjson',
+      'spur.version.404',
+      'spur.version.503',
+      'spur.version.reject',
+    ].map((mode): SpurVersionCase => [
+      mode,
+      { status: 'warning', blocking: false, fix: spurVersionUnread },
+    ]),
+  ];
+  it.each(spurVersionCases)('reports spur.version for %s', async (mode, expected) => {
+    const report = await runDaemonDoctor(
+      doctorContext({ operator: true }),
+      '1.2.3',
+      doctorFetch(mode),
+    );
+    const ids = report.checks.map((check) => check.id);
+    expect(ids.indexOf('spur.version')).toBe(ids.indexOf('spur.send') + 1);
+    const entry = report.checks.find((check) => check.id === 'spur.version');
+    expect(entry).toEqual({ id: 'spur.version', ...expected });
+    expect(entry?.fix?.includes('upgrade Spur to 1.53.0 or newer') ?? false).toBe(
+      expected.status === 'fail',
+    );
+    if (expected.status !== 'pass') expect(entry?.fix).toContain('restart the Spur daemon');
+    expect(entry?.fix ?? '').not.toContain('spur --version');
+    expect(JSON.stringify(report)).not.toContain('/info-secret-canary');
+    expect(doctorReportSchema.safeParse(report).success).toBe(true);
+  });
+
+  it('bounds the Spur version body read with the doctor deadline', async () => {
+    const started = Date.now();
+    const report = await runDaemonDoctor(
+      doctorContext({ operator: true, slack: false }),
+      '1.2.3',
+      doctorFetch('spur.version.stalled-body'),
+      { deadlineMs: 250 },
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(report.checks.find((entry) => entry.id === 'spur.version')).toEqual({
+      id: 'spur.version',
+      status: 'warning',
+      blocking: false,
+      fix: spurVersionUnread,
+    });
+  });
+
+  it.each(['spur.version.stalled-body', 'spur.version.stalled-fetch'])(
+    'keeps the other Spur checks passing while /info stalls (%s)',
+    async (mode) => {
+      const report = await runDaemonDoctor(
+        doctorContext({ operator: true, slack: false }),
+        '1.2.3',
+        doctorFetch(mode),
+        { deadlineMs: 250 },
+      );
+      const byId = new Map(report.checks.map((check) => [check.id, check]));
+      expect(byId.get('spur.api')).toMatchObject({ status: 'pass', blocking: false });
+      expect(byId.get('spur.send')).toMatchObject({ status: 'pass', blocking: false });
+      expect(byId.get('spur.version')).toEqual({
+        id: 'spur.version',
+        status: 'warning',
+        blocking: false,
+        fix: spurVersionUnread,
+      });
+    },
+  );
+
+  it.each([
+    ['jira', (path: string) => path.endsWith('/myself')],
+    ['github', (path: string, host: string) => host === 'api.github.com' || path === '/graphql'],
+    ['spur.api', (path: string) => path.endsWith('/sessions')],
+    ['spur.send', (path: string) => path.endsWith('/send')],
+    ['slack.auth', (path: string) => path.endsWith('/auth.test')],
+    ['slack channels', (path: string) => path.endsWith('/conversations.info')],
+    ['slack.command', (path: string) => path.endsWith('/apps.manifest.export')],
+  ])('starts the %s probe before a stalled /info settles', async (_group, matches) => {
+    const events: string[] = [];
+    const fallback = doctorFetch('spur.version.stalled-fetch');
+    const fetcher: typeof fetch = (input, init) => {
+      const url = new URL(
+        input instanceof URL ? input.href : input instanceof Request ? input.url : input,
+      );
+      if (url.pathname.endsWith('/info')) {
+        events.push('start:info');
+        return fallback(input, init).finally(() => events.push('settle:info'));
+      }
+      if (matches(url.pathname, url.host)) events.push('start:group');
+      return fallback(input, init);
+    };
+    const report = await runDaemonDoctor(doctorContext({ operator: true }), '1.2.3', fetcher, {
+      deadlineMs: 250,
+    });
+    expect(events).toContain('settle:info');
+    expect(events.indexOf('start:group')).toBeGreaterThanOrEqual(0);
+    // Started first, so its deadline overlaps every probe; awaited last, so it delays none.
+    expect(events.indexOf('start:info')).toBe(0);
+    expect(events.indexOf('start:info')).toBeLessThan(events.indexOf('start:group'));
+    expect(events.indexOf('start:group')).toBeLessThan(events.indexOf('settle:info'));
+    const ids = report.checks.map((check) => check.id);
+    expect(ids.indexOf('spur.version')).toBe(ids.indexOf('spur.send') + 1);
+    expect(report.checks.find((check) => check.id === 'spur.version')).toEqual({
+      id: 'spur.version',
+      status: 'warning',
+      blocking: false,
+      fix: spurVersionUnread,
+    });
+  });
+
+  it('names the minimum Spur version in README, SETUP and the setup skill', () => {
+    const read = (name: string): string =>
+      readFileSync(new URL(`../../../${name}`, import.meta.url), 'utf8');
+    const normalize = (text: string): string =>
+      text.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ');
+    const minimum = `Spur ${SPUR_MIN_VERSION} or newer`;
+    const needs = read('README.md').split('## What it needs')[1]?.split('\n## ')[0] ?? '';
+    expect(normalize(needs)).toContain(minimum);
+    const step = read('SETUP.md').split('\n## 1. ')[1]?.split('\n## 2. ')[0] ?? '';
+    expect(normalize(step)).toContain(minimum);
+    const inspect = normalize(read('packages/skills/setup/references/inspect.md'));
+    expect(inspect).toContain(minimum);
+    expect(inspect).toContain('restart the Spur daemon');
+    const guide = read('TROUBLESHOOTING.md');
+    const doctor = guide.split('## Doctor checks\n')[1]?.split('\n## ')[0] ?? '';
+    const section = normalize(doctor.split('### spur.version\n')[1]?.split('\n### ')[0] ?? '');
+    expect(section).toContain(SPUR_MIN_VERSION);
+    expect(section).toContain('restart the Spur daemon');
+    expect(guide).toMatch(/^\|.*`spur\.version`.*\|$/m);
+  });
 
   it('names missing secret variables and fails operator access without a project or token', async () => {
     const report = await runDaemonDoctor(doctorContext({ secrets: {} }), '1.2.3', doctorFetch());
@@ -1581,8 +1779,8 @@ describe('daemon doctor link rules', () => {
       'github.credentials',
       'link.rules',
     ]);
-    // No Jira project: repository, permission probe, link sample and two Spur requests.
-    expect(fetcher).toHaveBeenCalledTimes(5);
+    // No Jira project: repository, permission probe, link sample and three Spur requests.
+    expect(fetcher).toHaveBeenCalledTimes(6);
   });
 
   it('passes link.rules with the match count when every sampled PR matches', async () => {
@@ -1648,8 +1846,8 @@ describe('daemon doctor link rules', () => {
     expect(check).toMatchObject({ status: 'warning', blocking: false });
     expect(check?.fix).toContain('board: link rules match 1 of the last 2 PRs in example/board');
     expect(check?.fix).toContain('not matched: #2 `feature/no-key`');
-    // Jira, repository, permission probe, link sample and two Spur requests.
-    expect(fetcher).toHaveBeenCalledTimes(6);
+    // Jira, repository, permission probe, link sample and three Spur requests.
+    expect(fetcher).toHaveBeenCalledTimes(7);
   });
 
   it('samples every repo of a Jira project', async () => {
