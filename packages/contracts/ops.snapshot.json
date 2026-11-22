@@ -1,5 +1,5 @@
 {
-  "version": "82b21ec16a7025ede7cd8c1ec4b1aef4640343b5c5fb58016bfe74a7e76a6662",
+  "version": "f2bda7c94f22a97ec16a79605ff9e1ad9ef1fe06fbd9b2b6bdf09701f7d18fd2",
   "grants": [
     "operator",
     "project-agent",
@@ -8772,7 +8772,7 @@
     {
       "id": "item.close",
       "kind": "mutation",
-      "description": "Close a \"from you\" item without acting on it.",
+      "description": "Close a \"from you\" item without retrying; some block items close their block.",
       "grants": [{ "grant": "operator" }],
       "preconditions": null,
       "errors": [
@@ -8790,7 +8790,7 @@
       "mcp": {
         "name": "item_close",
         "key": "idempotencyKey",
-        "whenToUse": "Dismiss an item without retrying.",
+        "whenToUse": "Dismiss an item without retrying. An anomaly, cycle_limit or course_check item also closes its block; an operator-block: item closes its block when you may unblock it.",
         "whenNotToUse": "Use item_retry to try again.",
         "destructive": true
       },

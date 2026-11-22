@@ -986,9 +986,9 @@ describe('snapshot', () => {
     // operator kind of unbound columns in config.get and the no-turn Done without a live worker.
     // #804 adds task.wait, the optional turn wait in turn views, the turn_wait_limit code and the
     // turn wait event kinds. #810 adds the optional projects[].columns[].quietAfterMs to
-    // config.get.
+    // config.get. #815 says which items item.close also closes the block of.
     expect(await catalogVersion(baseline)).toBe(
-      'd83666ace4f306a8034b6403263e90439b4a38810ef6bd2baee38fd055065f7c',
+      'c7f126098cef8f5494beae2d5cb681ac899eecfffe891f7b6b827df5e93e3710',
     );
   });
   const throwaway = (input: z.ZodObject, output: z.ZodType) =>
