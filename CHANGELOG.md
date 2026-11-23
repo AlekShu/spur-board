@@ -2,6 +2,12 @@
 
 Notable changes in each spur-board release, newest first. A breaking change lists what changed and how to migrate the config under **BREAKING CHANGES**; the versioning policy is in [CONTRIBUTING.md](CONTRIBUTING.md#versions-and-the-changelog). Releases before this file, and any release not listed here, are on the [GitHub releases page](https://github.com/AnDeVerin/spur-board/releases).
 
+## [0.165.1](https://github.com/AnDeVerin/spur-board/compare/v0.165.0...v0.165.1) (2026-11-23)
+
+### Bug Fixes
+
+* **testkit:** [#866](https://github.com/AnDeVerin/spur-board/issues/866) refuse Vitest runs started in a package dir ([#886](https://github.com/AnDeVerin/spur-board/issues/886)) ([4ed056c](https://github.com/AnDeVerin/spur-board/commit/4ed056c4b6265ad5c1e83b60d28abe0ef352a705))
+
 ## [0.165.0](https://github.com/AnDeVerin/spur-board/compare/v0.164.4...v0.165.0) (2026-11-23)
 
 ### Features
