@@ -1,13 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import semanticRelease from 'semantic-release';
 import { dryRunEnv, nextVersion } from './release-candidate.ts';
 import { createReleasePackage, digest, publishTarball } from './release-package.ts';
+import { tempDir } from './test-temp-dir.ts';
 
 const require = createRequire(import.meta.url);
 const config = require('../release.config.cjs') as {
@@ -38,7 +38,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 function fixture(message: string, tag = 'v0.1.0'): { repo: string; remote: string } {
-  const root = mkdtempSync(join(tmpdir(), 'release-policy-'));
+  const root = tempDir('release-policy-');
   const repo = join(root, 'repo');
   const remote = join(root, 'remote.git');
   git(root, 'init', '-q', '-b', 'main', repo);
@@ -96,7 +96,13 @@ const CHANGELOG = new URL('../CHANGELOG.md', import.meta.url);
 
 /** The gate-on plugins a changelog commit needs, in config order. */
 function changelogCommitPlugins(): Plugin[] {
-  const keep = ['release-analyzer.ts', 'release-notes-generator', 'changelog:CHANGELOG.md', 'git'];
+  const keep = [
+    'release-analyzer.ts',
+    'release-notes-generator',
+    'release-changelog.ts',
+    'changelog:CHANGELOG.md',
+    'git',
+  ];
   const plugins = loadConfig('true').plugins;
   const labels = pluginLabels(plugins);
   return plugins.filter((_plugin, index) => keep.includes(labels[index] ?? ''));
@@ -197,6 +203,7 @@ describe('release policy', () => {
       'release-analyzer.ts',
       'release-notes-generator',
       'changelog:RELEASE_CHANGELOG.md',
+      'release-changelog.ts',
       'changelog:CHANGELOG.md',
       'npm',
       'release-package.ts',
@@ -243,8 +250,38 @@ describe('release policy', () => {
     expect(git(remote, 'rev-parse', 'main')).toBe(main);
   });
 
+  it('replaces an untagged changelog entry after a refused tag push', async () => {
+    const { repo, remote } = changelogFixture();
+    const hook = join(remote, 'hooks', 'pre-receive');
+    writeFileSync(
+      hook,
+      '#!/bin/sh\nwhile read -r old new ref; do\n  case "$ref" in refs/tags/*) exit 1;; esac\ndone\nexit 0\n',
+    );
+    chmodSync(hook, 0o755);
+    await expect(releaseWithChangelog(repo, remote)).rejects.toThrow();
+    expect(git(remote, 'log', '-1', '--format=%s', 'main')).toBe('chore(release): 0.2.0 [skip ci]');
+    expect(git(repo, 'ls-remote', '--tags', 'origin')).not.toContain('v0.2.0');
+
+    rmSync(hook);
+    const clone = join(dirname(repo), 'clone');
+    git(dirname(repo), 'clone', '-q', `file://${remote}`, clone);
+    writeFileSync(join(clone, 'README.md'), 'repaired\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-qm', 'fix(core): repair API');
+    git(clone, 'push', '-q', 'origin', 'main');
+    const result = await releaseWithChangelog(clone, remote);
+    expect(result ? result.nextRelease.version : null).toBe('0.2.0');
+
+    const changelog = git(remote, 'show', 'main:CHANGELOG.md');
+    expect(changelog.match(/^## \[?0\.2\.0\b/gm)).toHaveLength(1);
+    expect(changelog).toContain('add API');
+    expect(changelog).toContain('repair API');
+    expect(changelog.indexOf('## Older')).toBeGreaterThan(changelog.indexOf('repair API'));
+    expect(git(remote, 'rev-list', '-n1', 'v0.2.0')).toBe(git(remote, 'rev-parse', 'main'));
+  });
+
   function candidate(contents = 'candidate tarball') {
-    const cwd = mkdtempSync(join(tmpdir(), 'release-artifact-'));
+    const cwd = tempDir('release-artifact-');
     const artifact = join(cwd, 'release-artifacts', 'spur-board-0.2.0.tgz');
     mkdirSync(join(cwd, 'release-artifacts'));
     writeFileSync(artifact, contents);
@@ -322,22 +359,35 @@ describe('release policy', () => {
   });
 
   it('passes the checked tarball to npm publish with provenance', () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'release-publish-'));
+    const cwd = tempDir('release-publish-');
     const bin = join(cwd, 'bin');
     mkdirSync(bin);
     const capture = join(cwd, 'npm-args');
+    const tokens = join(cwd, 'npm-tokens');
     const npm = join(bin, 'npm');
-    writeFileSync(npm, '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$CAPTURE"\n');
+    writeFileSync(
+      npm,
+      '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$CAPTURE"\n' +
+        'printf \'%s %s\\n\' "${GIT_CREDENTIALS-unset}" "${APP_TOKEN-unset}" > "$TOKENS"\n',
+    );
     chmodSync(npm, 0o755);
     const tarball = join(cwd, 'spur-board-0.2.0.tgz');
     publishTarball(tarball, {
       cwd,
-      env: { PATH: `${bin}:${process.env['PATH'] ?? ''}`, CAPTURE: capture },
+      env: {
+        PATH: `${bin}:${process.env['PATH'] ?? ''}`,
+        CAPTURE: capture,
+        TOKENS: tokens,
+        GIT_CREDENTIALS: 'sentinel-git',
+        APP_TOKEN: 'sentinel-app',
+      },
       nextRelease: { version: '0.2.0' },
     });
     expect(readFileSync(capture, 'utf8')).toBe(
       `publish\n${tarball}\n--provenance\n--access\npublic\n`,
     );
+    // The release App token bypasses the main rulesets; npm never needs it.
+    expect(readFileSync(tokens, 'utf8')).toBe('unset unset\n');
   });
 
   const breakingFooter = 'BREAKING CHANGE: migrate the config';
