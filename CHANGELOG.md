@@ -2,6 +2,12 @@
 
 Notable changes in each spur-board release, newest first. A breaking change lists what changed and how to migrate the config under **BREAKING CHANGES**; the versioning policy is in [CONTRIBUTING.md](CONTRIBUTING.md#versions-and-the-changelog). Releases before this file, and any release not listed here, are on the [GitHub releases page](https://github.com/AnDeVerin/spur-board/releases).
 
+## [0.165.2](https://github.com/AnDeVerin/spur-board/compare/v0.165.1...v0.165.2) (2026-11-23)
+
+### Bug Fixes
+
+* **adapters:** [#888](https://github.com/AnDeVerin/spur-board/issues/888) cap the spur poll backoff at 60 s ([#890](https://github.com/AnDeVerin/spur-board/issues/890)) ([2b66d9e](https://github.com/AnDeVerin/spur-board/commit/2b66d9ece6a50955cf4025771b180263d245bee9))
+
 ## [0.165.1](https://github.com/AnDeVerin/spur-board/compare/v0.165.0...v0.165.1) (2026-11-23)
 
 ### Bug Fixes
