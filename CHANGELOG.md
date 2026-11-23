@@ -2,6 +2,16 @@
 
 Notable changes in each spur-board release, newest first. A breaking change lists what changed and how to migrate the config under **BREAKING CHANGES**; the versioning policy is in [CONTRIBUTING.md](CONTRIBUTING.md#versions-and-the-changelog). Releases before this file, and any release not listed here, are on the [GitHub releases page](https://github.com/AnDeVerin/spur-board/releases).
 
+## [0.165.0](https://github.com/AnDeVerin/spur-board/compare/v0.164.4...v0.165.0) (2026-11-23)
+
+### Features
+
+* **web:** [#811](https://github.com/AnDeVerin/spur-board/issues/811) open a project block in a block panel from the inbox ([#881](https://github.com/AnDeVerin/spur-board/issues/881)) ([dfddaa1](https://github.com/AnDeVerin/spur-board/commit/dfddaa1211dcaccfeb1c7b1062f30e932a7bf80f))
+
+### Bug Fixes
+
+* **web:** [#883](https://github.com/AnDeVerin/spur-board/issues/883) accept cross-site top-level navigations to the page ([#885](https://github.com/AnDeVerin/spur-board/issues/885)) ([5c20ec3](https://github.com/AnDeVerin/spur-board/commit/5c20ec3c28fb4dff63dd420a76cce5f42c6e5991))
+
 ## [0.164.4](https://github.com/AnDeVerin/spur-board/compare/v0.164.3...v0.164.4) (2026-11-23)
 
 ### Bug Fixes
