@@ -44,10 +44,20 @@ or the CLI.
 
 ## What it needs
 
-Linux with systemd user services, Node 24.12+ (24.x) or 26.x, a running
-[Spur](https://github.com/ashugaev/spur) 1.53.0 or newer, a GitHub token, Jira credentials for
-Jira projects, and optionally a Slack app. The optional web console has no login of its own and
-needs an authenticating reverse proxy or an SSH tunnel to reach it from another machine.
+Linux with systemd user services and `flock` (util-linux), Node 24.12+ (24.x) or 26.x, a running
+[Spur](https://github.com/ashugaev/spur) 1.53.0 or newer, a GitHub token (a classic personal
+access token with the scopes listed in [SETUP.md](SETUP.md#configuration-and-secrets)), Jira
+credentials for Jira projects, and optionally a Slack app. The optional web console has no login
+of its own and needs an authenticating reverse proxy or an SSH tunnel to reach it from another
+machine.
+
+## Start here
+
+1. [Overview](docs/overview.md): what the Board does and how tasks move through its columns.
+2. [Quickstart](docs/quickstart.md): from zero to a first task in Done with the minimal example.
+3. [SETUP.md](SETUP.md): every install step, file location and command.
+4. [Configuration reference](docs/configuration.md): every `config.yaml` field and secret.
+5. [Docs index](docs/README.md): the guides for users and contributors.
 
 ## Get started
 
@@ -78,7 +88,7 @@ prompts for one repository with Todo, Dev, Review and Done.
 
 ## Reference
 
-- [CLI commands](docs/cli.md), [configuration](docs/configuration.md), and the [docs index](docs/)
+- [CLI commands](docs/cli.md), [configuration](docs/configuration.md), and the [docs index](docs/README.md)
 - [Changelog](CHANGELOG.md): read it before an upgrade with `board update`; versions follow
   [CONTRIBUTING.md](CONTRIBUTING.md#versions-and-the-changelog)
 - [How the Board works](docs/how-board-works.md) and the [web UI](docs/web-ui.md)
