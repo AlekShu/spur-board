@@ -285,7 +285,9 @@ export function InboxPanel({
         </a>
       );
     }
-    if (entry.task === null && url !== null)
+    // A task row opens its task, a task-less block the block panel, both over the inbox.
+    const opens = entry.task ?? (entry.kind === 'block' ? `block:${entry.id}` : null);
+    if (opens === null && url !== null)
       return (
         <a
           className={className}
@@ -298,7 +300,7 @@ export function InboxPanel({
           {content}
         </a>
       );
-    return entry.task === null ? (
+    return opens === null ? (
       <div
         className={className}
         tabIndex={0}
@@ -311,11 +313,11 @@ export function InboxPanel({
       <a
         key={entry.id}
         className={className}
-        href={openHref(entry.task)}
+        href={openHref(opens)}
         data-inbox-id={entry.id}
         data-handled={handled || undefined}
         onClick={(event) => {
-          open(event, entry.task ?? '', () => {
+          open(event, opens, () => {
             onOpen(entry);
           });
         }}
