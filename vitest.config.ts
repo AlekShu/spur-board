@@ -1,19 +1,21 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 // GitHub Actions gets failure annotations and a JUnit file in reports/ for the run's artifact.
-// Local runs keep the Vitest default reporters.
-const ci =
+// Local runs keep Vitest's default reporters (`minimal` for an agent). Both add the signal
+// reporter, which prints the running test files on SIGTERM.
+const signals = './packages/testkit/src/signal-reporter.ts';
+const reporting =
   process.env['GITHUB_ACTIONS'] === 'true'
     ? {
-        reporters: ['default', 'github-actions', 'junit'],
+        reporters: ['default', 'github-actions', 'junit', signals],
         outputFile: { junit: 'reports/junit.xml' },
       }
-    : {};
+    : { reporters: [...configDefaults.reporters, signals] };
 
 // The only Vitest config: every test runs through the testkit harness.
 export default defineConfig({
   test: {
-    ...ci,
+    ...reporting,
     // Workers must be child processes that inherit the scrubbed env. With
     // `threads`, /proc/self/environ would be the unscrubbed main process's.
     pool: 'forks',
@@ -34,6 +36,7 @@ export default defineConfig({
             'packages/daemon/test/single-instance.test.ts',
             'packages/stand/test/fake-cli.test.ts',
             'packages/web/test/kit.test.ts',
+            'packages/testkit/test/signal-reporter.test.ts',
           ],
         },
       },
@@ -70,6 +73,7 @@ export default defineConfig({
             'packages/daemon/test/single-instance.test.ts',
             'packages/stand/test/fake-cli.test.ts',
             'packages/web/test/kit.test.ts',
+            'packages/testkit/test/signal-reporter.test.ts',
           ],
           testTimeout: 30_000,
         },

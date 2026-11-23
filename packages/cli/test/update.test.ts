@@ -440,8 +440,11 @@ const server = createServer((request, response) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const env = { ...setup.env, BOARD_DAEMON_URL: 'http://127.0.0.1:' + server.address().port };
 const ok = (stdout = '') => ({ exitCode: 0, stdout, stderr: '' });
-const hold = 'require("node:fs").writeFileSync(' + JSON.stringify(setup.marker) +
-  ', String(process.pid)); setInterval(() => {}, 1000);';
+// The PID goes to a sibling file renamed into place, so a reader sees all of it or no marker.
+const hold = 'const fs = require("node:fs"); fs.writeFileSync(' +
+  JSON.stringify(setup.marker + '.tmp') + ', String(process.pid)); fs.renameSync(' +
+  JSON.stringify(setup.marker + '.tmp') + ', ' + JSON.stringify(setup.marker) +
+  '); setInterval(() => {}, 1000);';
 const runner = async (command, args, options) => {
   if (command === 'flock') return runCommand(command, args, options);
   if (command === 'systemctl') return ok(args.includes('show') ? setup.show : '');
@@ -1450,11 +1453,19 @@ describe('board update', () => {
     const installPid = await vi.waitFor(
       () => {
         expect(parent.exitCode, parentErr).toBeNull();
-        return Number(readFileSync(marker, 'utf8'));
+        // The install renames a complete marker into place. Check it anyway: an empty or
+        // partial marker would be a wrong PID, and an empty one is PID 0, which
+        // process.kill(0) turns into a signal to this whole process group (#884).
+        const text = readFileSync(marker, 'utf8');
+        expect(text).toMatch(/^[1-9]\d*$/);
+        return Number(text);
       },
       { timeout: 20_000, interval: 50 },
     );
+    let installGone = false;
     cleanups.push(() => {
+      // Once the install is seen gone, its PID may belong to another process.
+      if (installGone) return;
       try {
         process.kill(installPid, 'SIGKILL');
       } catch {
@@ -1478,6 +1489,7 @@ describe('board update', () => {
       },
       { timeout: 10_000, interval: 50 },
     );
+    installGone = true;
     const back = await s.run(['--json', 'rollback', '--yes']);
     expect(back.exit, back.stderr).toBe(0);
     expect(s.state().status).toBe('rolled-back');
