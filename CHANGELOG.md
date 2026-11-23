@@ -2,6 +2,12 @@
 
 Notable changes in each spur-board release, newest first. A breaking change lists what changed and how to migrate the config under **BREAKING CHANGES**; the versioning policy is in [CONTRIBUTING.md](CONTRIBUTING.md#versions-and-the-changelog). Releases before this file, and any release not listed here, are on the [GitHub releases page](https://github.com/AnDeVerin/spur-board/releases).
 
+## [0.164.3](https://github.com/AnDeVerin/spur-board/compare/v0.164.2...v0.164.3) (2026-11-23)
+
+### Bug Fixes
+
+* **web:** [#809](https://github.com/AnDeVerin/spur-board/issues/809) give the warn chip text the attention text token ([#878](https://github.com/AnDeVerin/spur-board/issues/878)) ([97eb403](https://github.com/AnDeVerin/spur-board/commit/97eb403b42d4ed5a6bc8762e8e3fcb6ec13eb1f9))
+
 ## [0.164.2](https://github.com/AnDeVerin/spur-board/compare/v0.164.1...v0.164.2) (2026-11-23)
 
 ### Bug Fixes
