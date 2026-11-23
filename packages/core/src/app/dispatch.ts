@@ -967,6 +967,59 @@ async function reopenNeedsDispatch(trx: Trx, taskId: number, project: Project): 
   });
 }
 
+const readTicketSnapshot = (trx: Trx, taskId: number) =>
+  trx
+    .selectFrom('ticket_snapshot')
+    .select(['status', 'detail', 'observed_at'])
+    .where('task_id', '=', taskId)
+    .executeTakeFirst();
+
+/**
+ * The PR the dispatcher judges the task on, with the task's PR link (`taskPr`), or null when a
+ * stored PR snapshot is unreadable. A merge of another link decides when the linked PR is not
+ * merged: a done ticket ends the task on it whatever its other PRs are, and a follow-up closed
+ * unmerged with none open, or no active PR at all beside a merged conflict link, leaves it to
+ * judge. Only reads; `task.move` refuses a correction while this PR is merged.
+ */
+export async function judgedPr(
+  trx: Trx,
+  taskId: number,
+  project: Project,
+): Promise<{ link: Awaited<ReturnType<typeof taskPr>>; pr: PrFacts | null } | null> {
+  const readPr = async (ref: { repo: string; number: number }) =>
+    parsePr(
+      (
+        await trx
+          .selectFrom('pr_snapshot')
+          .select('detail')
+          .where(sql<boolean>`lower(repo) = ${ref.repo.toLowerCase()}`)
+          .where('number', '=', ref.number)
+          .executeTakeFirst()
+      )?.detail,
+    );
+  const link = await taskPr(trx, taskId);
+  let pr: PrFacts | null = null;
+  if (link !== null) {
+    pr = await readPr(link);
+    if (pr === null) return null;
+  }
+  if (pr === null || pr.state !== 'merged') {
+    const merged = await taskMergedPr(trx, taskId);
+    if (merged !== null) {
+      const ticket = await readTicketSnapshot(trx, taskId);
+      if (
+        pr === null ||
+        (pr.state === 'closed' && link?.open !== true) ||
+        (ticket !== undefined && ticketDone(project, ticket.status))
+      ) {
+        pr = await readPr(merged);
+        if (pr === null) return null;
+      }
+    }
+  }
+  return { link, pr };
+}
+
 /** The dispatcher input, or null when a stored snapshot is missing or unreadable. Only reads. */
 export async function readInput(
   trx: Trx,
@@ -983,54 +1036,25 @@ export async function readInput(
   unclosed: Row<'turn'> | undefined;
   /** The merged PR whose ticket changed at or after the merge, not done: the task has no PR for the gates. */
   mergedOpen: { repo: string; number: number } | undefined;
+  /** The merged PR the task is judged on, which a `merged` move names; absent when none. */
+  mergedPr: { repo: string; number: number } | undefined;
   /** The task's PR merged and its ticket is neither done nor confirmed open: hold the task. */
   ticketUnconfirmed: boolean;
   /** The pending turn submit of the current visit (`on` mode); absent when none waits. */
   pending: PendingSubmit | undefined;
 } | null> {
-  const readPr = async (ref: { repo: string; number: number }) =>
-    parsePr(
-      (
-        await trx
-          .selectFrom('pr_snapshot')
-          .select('detail')
-          .where(sql<boolean>`lower(repo) = ${ref.repo.toLowerCase()}`)
-          .where('number', '=', ref.number)
-          .executeTakeFirst()
-      )?.detail,
-    );
-  const link = await taskPr(trx, task.id);
-  let pr: PrFacts | null = null;
-  if (link !== null) {
-    pr = await readPr(link);
-    if (pr === null) return null;
-  }
-  const readTicket = () =>
-    trx
-      .selectFrom('ticket_snapshot')
-      .select(['status', 'detail', 'observed_at'])
-      .where('task_id', '=', task.id)
-      .executeTakeFirst();
-  // An earlier merge decides when the chosen PR is not merged: a done ticket ends the task on
-  // it whatever its other PRs are, and a follow-up closed unmerged with none open leaves it to judge.
-  if (pr !== null && pr.state !== 'merged') {
-    const merged = await taskMergedPr(trx, task.id);
-    if (merged !== null) {
-      const ticket = await readTicket();
-      if (
-        (pr.state === 'closed' && link?.open !== true) ||
-        (ticket !== undefined && ticketDone(project, ticket.status))
-      ) {
-        pr = await readPr(merged);
-        if (pr === null) return null;
-      }
-    }
-  }
+  const judged = await judgedPr(trx, task.id, project);
+  if (judged === null) return null;
+  const { link } = judged;
+  let { pr } = judged;
+  const readTicket = () => readTicketSnapshot(trx, task.id);
   // A merged PR finishes the task only with its ticket done. A ticket changed at or after the merge and
   // still not done sends it back to work without a PR; an untouched one waits.
   let mergedOpen: { repo: string; number: number } | undefined;
+  let mergedPr: { repo: string; number: number } | undefined;
   let ticketUnconfirmed = false;
   if (pr?.state === 'merged') {
+    mergedPr = { repo: pr.repo, number: pr.number };
     const ticket = await readTicket();
     // A ticket edited before a later merge of another PR waits for that merge's close too; the
     // interval fallback of a PR without a stored merge time applies only when no merge has one.
@@ -1202,6 +1226,7 @@ export async function readInput(
     handed,
     unclosed,
     mergedOpen,
+    mergedPr,
     ticketUnconfirmed,
     pending,
   };
@@ -1272,10 +1297,12 @@ async function applyOn(
       .returningAll()
       .executeTakeFirstOrThrow();
     await closeTurns(trx, { taskId: current.id, reason: 'moved', at });
+    const merged = move.reason === 'merged' ? read.mergedPr : undefined;
     await emit(trx, 'task_moved', current.project, current.id, at.toISOString(), {
       from: move.from,
       to: move.to,
       reason: move.reason,
+      ...(merged === undefined ? {} : { repo: merged.repo, pr: merged.number }),
     });
   }
   const turn = result.turn;
@@ -1586,9 +1613,9 @@ export async function dispatchMergedTickets(
     .where('task.membership', '!=', 'archived')
     .where((eb) => eb.or([eb('task.column', '!=', 'done'), eb('task.shadow_column', '!=', 'done')]))
     .where('link.entity', '=', 'pr')
-    .where('link.pr_state', '=', 'active')
     .where('link.banned', '=', 0)
     .where('pr_snapshot.state', '=', 'merged')
+    .where(pastReopenFloor)
     .execute();
   await dispatchTasks(
     trx,

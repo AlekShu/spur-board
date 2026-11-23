@@ -158,29 +158,46 @@ export async function taskPr(
 }
 
 /**
- * The task's newest merged PR: the newest active unbanned link past the reopen floor whose PR is
- * seen merged. Completes a task whose follow-up PR closed unmerged after an earlier merge.
+ * The merged links of one task that count, for the dispatcher and the inbox alike: the active
+ * ones when any active link merged, else every one, so a merged conflict link counts like an
+ * active one unless an active link merged too.
  */
-export async function taskMergedPr(
-  db: Trx,
-  taskId: number,
-): Promise<{ repo: string; number: number } | null> {
-  const link = await db
+export function eligibleMerges<T extends { pr_state: Link['pr_state'] }>(
+  merged: readonly T[],
+): T[] {
+  const active = merged.filter((link) => link.pr_state === 'active');
+  return active.length > 0 ? active : [...merged];
+}
+
+/** The task's unbanned PR links past the reopen floor whose PR is seen merged, of any kind. */
+function mergedLinks(db: Trx, taskId: number) {
+  return db
     .selectFrom('link')
     .innerJoin('pr_snapshot', (join) =>
       join
         .on(sql<boolean>`lower(pr_snapshot.repo) = lower(link.repo)`)
         .onRef('pr_snapshot.number', '=', 'link.number'),
     )
-    .select(['link.repo', 'link.number'])
+    .select(['link.id', 'link.pr_state', 'link.repo', 'link.number', 'pr_snapshot.detail'])
     .where('link.task_id', '=', taskId)
     .where('link.entity', '=', 'pr')
-    .where('link.pr_state', '=', 'active')
     .where('link.banned', '=', 0)
     .where('pr_snapshot.state', '=', 'merged')
     .where(pastReopenFloor)
-    .orderBy('link.id', 'desc')
-    .executeTakeFirst();
+    .execute();
+}
+
+/**
+ * The task's newest merged PR: the newest link among its `eligibleMerges`. Completes a task whose
+ * follow-up PR closed unmerged after an earlier merge, or whose redundant conflict-linked PR merged.
+ */
+export async function taskMergedPr(
+  db: Trx,
+  taskId: number,
+): Promise<{ repo: string; number: number } | null> {
+  let link: { id: number; repo: string | null; number: number | null } | undefined;
+  for (const row of eligibleMerges(await mergedLinks(db, taskId)))
+    if (link === undefined || row.id > link.id) link = row;
   return link?.repo == null || link.number === null
     ? null
     : { repo: link.repo, number: link.number };
@@ -191,21 +208,7 @@ export async function taskMergedPr(
  * null when none is readable. A merge after the judged PR's still holds a ticket edited before it.
  */
 export async function newestMergeAt(db: Trx, taskId: number): Promise<string | null> {
-  const rows = await db
-    .selectFrom('link')
-    .innerJoin('pr_snapshot', (join) =>
-      join
-        .on(sql<boolean>`lower(pr_snapshot.repo) = lower(link.repo)`)
-        .onRef('pr_snapshot.number', '=', 'link.number'),
-    )
-    .select('pr_snapshot.detail')
-    .where('link.task_id', '=', taskId)
-    .where('link.entity', '=', 'pr')
-    .where('link.pr_state', '=', 'active')
-    .where('link.banned', '=', 0)
-    .where('pr_snapshot.state', '=', 'merged')
-    .where(pastReopenFloor)
-    .execute();
+  const rows = eligibleMerges(await mergedLinks(db, taskId));
   return latest(rows.map((row) => parsePr(row.detail)?.mergedAt ?? null));
 }
 
@@ -375,6 +378,8 @@ interface MoveView {
   reason: MoveReason | 'returned' | 'corrected' | 'manual' | 'mirrored';
   gate: GateReason[];
   text: string | null;
+  /** The merged PR a `merged` move was decided by, as `repo#number`, when journaled. */
+  pr?: string;
 }
 
 function moveView(row: Selectable<EventTable>): MoveView | null {
@@ -413,14 +418,23 @@ function moveView(row: Selectable<EventTable>): MoveView | null {
   }
   const parsed = eventPayloadSchemas.task_moved.safeParse(payload);
   if (!parsed.success) return null;
-  const { from, to, reason, gate, block } = parsed.data;
+  const { from, to, reason, gate, block, repo, pr } = parsed.data;
   // `task.return` journals its move with the block it opened and no dispatcher reason.
   if (reason === undefined) {
     return block === undefined
       ? null
       : { ...base, kind: 'task_moved', from, to, reason: 'returned', gate: [], text: block };
   }
-  return { ...base, kind: 'task_moved', from, to, reason, gate: gate ?? [], text: null };
+  return {
+    ...base,
+    kind: 'task_moved',
+    from,
+    to,
+    reason,
+    gate: gate ?? [],
+    text: null,
+    ...(repo === undefined || pr === undefined ? {} : { pr: `${repo}#${String(pr)}` }),
+  };
 }
 
 /**
