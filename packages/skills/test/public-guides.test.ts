@@ -1,14 +1,15 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { APP_FILES } from '../../../scripts/package.ts';
-import { type Config, resolveWebOrigin } from '../../contracts/src/index.ts';
+import { COLUMNS, type Config, resolveWebOrigin } from '../../contracts/src/index.ts';
 
 const readmePath = fileURLToPath(new URL('../../../README.md', import.meta.url));
 const setupGuidePath = fileURLToPath(new URL('../../../SETUP.md', import.meta.url));
 const troubleshootingPath = fileURLToPath(new URL('../../../TROUBLESHOOTING.md', import.meta.url));
 const runbookPath = fileURLToPath(new URL('../../../docs/runbook.md', import.meta.url));
+const docsUrl = new URL('../../../docs/', import.meta.url);
 const updatePath = fileURLToPath(new URL('../setup/references/update.md', import.meta.url));
 const publicGuides = [readmePath, setupGuidePath, troubleshootingPath, runbookPath].map((path) =>
   readFileSync(path, 'utf8'),
@@ -35,6 +36,19 @@ const caddySection = section(browserAccess, '#### Remote access through Caddy wi
 const listening = section(publicGuides[2], '### web.listening');
 
 describe('public guide contents', () => {
+  it('introduces newcomers with every built-in column and working links', () => {
+    const overview = readFileSync(new URL('overview.md', docsUrl), 'utf8').replace(/\s+/g, ' ');
+    for (const column of COLUMNS) expect(overview).toContain(column.name);
+    const links = [...overview.matchAll(/\]\(([^)]+)\)/g)]
+      .map((match) => match[1] ?? '')
+      .filter((target) => !/^https?:/.test(target));
+    expect(links).toEqual(expect.arrayContaining(['../SETUP.md', 'configuration.md']));
+    for (const target of links) {
+      const path = fileURLToPath(new URL(target.split('#')[0] ?? '', docsUrl));
+      expect(existsSync(path), target).toBe(true);
+    }
+  });
+
   it('says the UI ships in the package and is off by default', () => {
     for (const doc of webDocs) expect(doc).not.toContain('supplied separately');
     expect(flat(browserAccess)).toContain('npm package ships the built web UI');
