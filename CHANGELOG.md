@@ -2,6 +2,12 @@
 
 Notable changes in each spur-board release, newest first. A breaking change lists what changed and how to migrate the config under **BREAKING CHANGES**; the versioning policy is in [CONTRIBUTING.md](CONTRIBUTING.md#versions-and-the-changelog). Releases before this file, and any release not listed here, are on the [GitHub releases page](https://github.com/AnDeVerin/spur-board/releases).
 
+## [0.166.0](https://github.com/AnDeVerin/spur-board/compare/v0.165.3...v0.166.0) (2026-11-24)
+
+### Features
+
+* **core:** [#891](https://github.com/AnDeVerin/spur-board/issues/891) wait for requested required reviewers instead of an immediate review-rule item ([#893](https://github.com/AnDeVerin/spur-board/issues/893)) ([64131c9](https://github.com/AnDeVerin/spur-board/commit/64131c9508388b229b6d26729fc1dbfb9773ec82))
+
 ## [0.165.3](https://github.com/AnDeVerin/spur-board/compare/v0.165.2...v0.165.3) (2026-11-24)
 
 ### Bug Fixes
