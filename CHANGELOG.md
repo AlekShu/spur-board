@@ -2,6 +2,12 @@
 
 Notable changes in each spur-board release, newest first. A breaking change lists what changed and how to migrate the config under **BREAKING CHANGES**; the versioning policy is in [CONTRIBUTING.md](CONTRIBUTING.md#versions-and-the-changelog). Releases before this file, and any release not listed here, are on the [GitHub releases page](https://github.com/AnDeVerin/spur-board/releases).
 
+## [0.170.0](https://github.com/AnDeVerin/spur-board/compare/v0.169.0...v0.170.0) (2026-11-24)
+
+### Features
+
+* **core:** [#900](https://github.com/AnDeVerin/spur-board/issues/900) submit a turn without a commit on a task with no PR ([#901](https://github.com/AnDeVerin/spur-board/issues/901)) ([3350492](https://github.com/AnDeVerin/spur-board/commit/3350492b7b0be7b4a4341e1cfd63ae15c4554f0c))
+
 ## [0.169.0](https://github.com/AnDeVerin/spur-board/compare/v0.168.0...v0.169.0) (2026-11-24)
 
 ### Features
