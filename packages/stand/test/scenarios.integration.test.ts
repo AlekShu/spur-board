@@ -24,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import YAML from 'yaml';
 import { MANIFEST_FILE, readManifest, STAND_PREFIX, type StandManifest } from '../src/manifest.ts';
 import { SCENARIOS, scenarioNames, type Scenario } from '../src/scenarios/index.ts';
+import { SHOWCASE_TASKS } from '../src/scenarios/showcase.ts';
 import { startStand, type Stand, type StandOptions } from '../src/stand.ts';
 import { liveConfigDir, writeLiveConfig } from './live-config.ts';
 
@@ -310,6 +311,7 @@ describe('scenarios', () => {
       'card-long',
       'readme-board',
       'ready-mirror',
+      'showcase',
     ]);
     for (const scenario of SCENARIOS) {
       expect(typeof scenario.seed, scenario.name).toBe('function');
@@ -3785,4 +3787,361 @@ describe('readme scenario', () => {
     ]);
     expect(await ok(current(), '/violations')).toMatchObject({ total: 0 });
   }, 90_000);
+});
+
+describe('showcase scenario', () => {
+  const DEMO = fileURLToPath(new URL('../../../docs/contributing/demo.md', import.meta.url));
+  const BANNED = [
+    'no-session:',
+    'turn-stall:',
+    'stuck-turn:',
+    'block:',
+    'worker_not_reading:',
+    'answer_undelivered:',
+  ];
+
+  it('showcase: every column filled with the listed states, unchanged after 60 minutes in 5-minute steps', async () => {
+    // A Wednesday, so Done does not archive at Saturday 00:00 UTC within the hour.
+    // The clock holds still through the seed, so an ask, its replies and its answer share one
+    // time and the remap must tell the opening comment by identity. It runs after the seed: the
+    // sender takes one send per space per second of it.
+    const seeded: { at?: number } = {};
+    await up({
+      clock: {
+        now: () => {
+          const epoch = Date.parse('2026-11-11T10:00:00.000Z');
+          return seeded.at === undefined ? epoch : epoch + (Date.now() - seeded.at);
+        },
+      },
+    });
+    const { scenario } = await seed('showcase');
+    seeded.at = Date.now();
+    const keyOf = (name: string): string => scenario.tasks?.[name] ?? `no task ${name}`;
+    const blockOf = (name: string): string => scenario.blocks?.[name] ?? `no block ${name}`;
+    interface Row {
+      key: string;
+      ticket?: { title: string };
+      column: string;
+      columnEnteredAt: string;
+      turn: { addressee: string; column: string; taken: { by: string } | null } | null;
+      returned?: { from: string; findings: number | null };
+      blocks: { id: string; addressee: string }[];
+      prSummary?: { approvals?: { author: string; onHead: boolean; commitsAfter: number }[] }[];
+    }
+    const { tasks } = await op<{ tasks: Row[] }>(current(), 'status.get', {
+      project: 'stand',
+      detail: true,
+    });
+    const counts: Record<string, number> = {};
+    for (const { column } of tasks) counts[column] = (counts[column] ?? 0) + 1;
+    expect(counts).toEqual({
+      todo: 3,
+      triage: 2,
+      'ready-for-dev': 2,
+      dev: 2,
+      review: 1,
+      'product-review': 1,
+      'external-review': 1,
+      qa: 1,
+      'ready-to-merge': 1,
+      done: 5,
+    });
+    for (const { name, title } of SHOWCASE_TASKS) {
+      expect(tasks.find(({ key }) => key === keyOf(name))?.ticket?.title, name).toBe(title);
+    }
+    // Every task entered its column enteredAgo before one and the same seed time.
+    const seededAt = new Set(
+      SHOWCASE_TASKS.map(({ name, enteredAgo }) => {
+        const entered = tasks.find(({ key }) => key === keyOf(name))?.columnEnteredAt;
+        return Date.parse(entered ?? '') + enteredAgo;
+      }),
+    );
+    expect(seededAt.size, [...seededAt].join()).toBe(1);
+    const row = (name: string): Row | undefined => tasks.find(({ key }) => key === keyOf(name));
+    interface Detail {
+      blocks: { id: string; state: string; answeredVia: string | null }[];
+      comments: { block: string | null; text: string }[];
+    }
+    const detail = (name: string) => op<Detail>(current(), 'task.get', { task: keyOf(name) });
+    const worker = expect.stringContaining(current().roles.worker) as unknown;
+
+    expect(row('dev-live')?.turn).toMatchObject({ addressee: 'worker', taken: { by: worker } });
+    expect(row('dev-live')?.blocks).toContainEqual({
+      id: blockOf('question'),
+      addressee: 'operator',
+      session: null,
+    });
+    const devLive = await detail('dev-live');
+    expect(devLive.blocks.find(({ id }) => id === blockOf('question'))?.state).toBe('open');
+    expect(
+      devLive.comments.filter(({ block }) => block === blockOf('question')).length,
+    ).toBeGreaterThanOrEqual(2);
+
+    expect(row('returned')?.returned).toMatchObject({ from: 'qa', findings: 3 });
+    expect(row('returned')?.turn).toMatchObject({ addressee: 'worker', taken: null });
+    expect(row('returned')?.blocks.map(({ id, addressee }) => [id, addressee])).toContainEqual([
+      blockOf('code'),
+      'worker',
+    ]);
+    expect((await detail('returned')).comments.some(({ block }) => block === null)).toBe(true);
+    expect(row('review-taken')?.turn).toMatchObject({
+      addressee: 'orchestrator:review',
+      taken: { by: expect.any(String) as unknown },
+    });
+    expect(row('product-review-open')?.turn).toMatchObject({
+      column: 'product-review',
+      taken: null,
+    });
+    expect(row('external-waiting')?.turn).toBeNull();
+    expect(row('external-waiting')?.prSummary?.[0]?.approvals).toBeUndefined();
+    expect(row('qa')?.turn).toMatchObject({ column: 'qa', taken: null });
+    expect(row('ready-stale')?.turn).toMatchObject({ column: 'ready-to-merge' });
+    expect(row('ready-stale')?.prSummary?.[0]?.approvals?.[0]).toMatchObject({
+      onHead: false,
+      commitsAfter: 3,
+    });
+
+    const readyStale = await detail('ready-stale');
+    const answered = readyStale.blocks.find(({ id }) => id === blockOf('answered'));
+    expect(answered).toMatchObject({ state: 'unblocked', answeredVia: null });
+    expect(readyStale.comments.filter(({ block }) => block === blockOf('answered'))).toHaveLength(
+      2,
+    );
+
+    interface Inbox {
+      items: { id: string; severity: string }[];
+      handled: { id: string; kind: string }[];
+    }
+    const inbox = await op<Inbox>(current(), 'inbox.operator', {});
+    expect(new Set(inbox.items.map(({ severity }) => severity))).toEqual(
+      new Set(['failure', 'attention']),
+    );
+    expect(inbox.handled.map(({ id }) => id)).toContain(blockOf('answered'));
+    expect(inbox.handled.some(({ kind }) => kind === 'turn')).toBe(true);
+
+    const { sources } = await op<{
+      sources: { source: string; lastCompleteAt: string | null; failure: unknown }[];
+    }>(current(), 'status.get', { project: 'stand' });
+    expect(
+      sources.find(({ source }) => source === 'github-project:stand:stand-org/1'),
+    ).toMatchObject({ lastCompleteAt: expect.any(String) as unknown, failure: null });
+
+    interface HistoryEvent {
+      at: string;
+      kind: string;
+    }
+    const history = (
+      await op<{ events: HistoryEvent[] }>(current(), 'task.history', {
+        task: keyOf('done-flow'),
+      })
+    ).events;
+    const kinds = new Set(history.map(({ kind }) => kind));
+    for (const kind of [
+      'task_moved',
+      'turn_opened',
+      'turn_taken',
+      'checks_changed',
+      'review_submitted',
+    ])
+      expect(kinds, kind).toContain(kind);
+    const times = history.map(({ at }) => Date.parse(at));
+    expect(Math.max(...times) - Math.min(...times)).toBeGreaterThanOrEqual(60 * 60_000);
+    expect(scenario.direct).toEqual([
+      'journal times spread before the seed: no operation sets when a task entered its column (#894); closed blocks and their comments move with their events, open blocks, turns and notifications keep seed times',
+    ]);
+
+    const store = openStore(join(current().home, 'board.sqlite'));
+    try {
+      // Every task's History reads in id order, and each closed block agrees with its events.
+      let closed = 0;
+      for (const { name } of SHOWCASE_TASKS) {
+        const task = await store.db
+          .selectFrom('task')
+          .select('id')
+          .where('key', '=', keyOf(name))
+          .executeTakeFirstOrThrow();
+        const events = await store.db
+          .selectFrom('event')
+          .select(['id', 'kind', 'payload', 'at'])
+          .where('task_id', '=', task.id)
+          .orderBy('id')
+          .execute();
+        const byTime = [...events].sort((a, b) =>
+          a.at === b.at ? a.id - b.id : a.at < b.at ? -1 : 1,
+        );
+        expect(
+          byTime.map(({ id }) => id),
+          name,
+        ).toEqual(events.map(({ id }) => id));
+        const blocks = await store.db
+          .selectFrom('block')
+          .select(['id', 'author', 'reason', 'created_at', 'unblocked_at'])
+          .where('task_id', '=', task.id)
+          .where('state', '=', 'unblocked')
+          .execute();
+        const views = blocks.length === 0 ? [] : (await detail(name)).blocks;
+        for (const block of blocks) {
+          closed += 1;
+          const ref = `B${String(block.id)}`;
+          const of = (kind: string) =>
+            events.filter(
+              (event) =>
+                event.kind === kind &&
+                (JSON.parse(event.payload) as { block?: unknown }).block === ref,
+            );
+          expect(
+            of('block_opened').map(({ at }) => at),
+            ref,
+          ).toEqual([block.created_at]);
+          expect(
+            of('block_unblocked').map(({ at }) => at),
+            ref,
+          ).toEqual([block.unblocked_at]);
+          expect(block.created_at <= (block.unblocked_at ?? ''), ref).toBe(true);
+          const comments = await store.db
+            .selectFrom('comment')
+            .select(['id', 'author', 'text', 'created_at'])
+            .where('block_id', '=', block.id)
+            .orderBy('id')
+            .execute();
+          const at = comments.map(({ created_at }) => created_at);
+          expect(at, ref).toEqual([...at].sort());
+          // `block.ask` writes the opening comment first with the block's author and reason; it
+          // keeps the block's time so the thread hides it, and each reply takes its own event's.
+          const [opening, ...replies] = comments;
+          expect([opening?.author, opening?.text], ref).toEqual([block.author, block.reason]);
+          expect(opening?.created_at, ref).toBe(block.created_at);
+          for (const reply of replies)
+            expect(reply.created_at, `C${String(reply.id)}`).toBe(
+              events.find(
+                (event) =>
+                  event.kind === 'comment_added' &&
+                  (JSON.parse(event.payload) as { comment?: unknown }).comment ===
+                    `C${String(reply.id)}`,
+              )?.at,
+            );
+          expect(replies.length, ref).toBeGreaterThan(0);
+          expect(views.find(({ id }) => id === ref)?.answeredVia, ref).toBeNull();
+        }
+      }
+      expect(closed).toBeGreaterThan(0);
+      const snapshots = await store.db.selectFrom('pr_snapshot').select('detail').execute();
+      expect(snapshots.length).toBeGreaterThan(0);
+      const states = snapshots.flatMap(({ detail: json }) =>
+        (JSON.parse(json) as { reviews: { state: string }[] }).reviews.map(({ state }) =>
+          state.toLowerCase(),
+        ),
+      );
+      expect(states).toContain('approved');
+      expect(states).not.toContain('changes_requested');
+
+      // The hour after the seed: nothing journals, moves, opens or closes a turn, or raises or
+      // clears an item. Each `/poll` restarts the adapter runner, so the Spur adapter forgets its
+      // health smoothing and journals `session_facts_changed` with a new `healthSince` for each
+      // linked task; those rows are checked apart: the same facts, only `healthSince` moved.
+      const RESTART = 'session_facts_changed';
+      const stable = async () => {
+        const all = await op<Status>(current(), 'status.get', {});
+        const events = await store.db
+          .selectFrom('event')
+          .select('task_id')
+          .select(({ fn }) => fn.max<number>('id').as('newest'))
+          .where('task_id', 'is not', null)
+          .where('kind', '!=', RESTART)
+          .groupBy('task_id')
+          .orderBy('task_id')
+          .execute();
+        const turns = await store.db
+          .selectFrom('turn')
+          .select(['id', 'acked_at'])
+          .where('closed_at', 'is', null)
+          .orderBy('id')
+          .execute();
+        const operator = await op<Inbox>(current(), 'inbox.operator', {});
+        return {
+          columns: Object.fromEntries(all.tasks.map(({ key, column }) => [key, column])),
+          turns: turns.map(({ id, acked_at }) => [id, acked_at !== null]),
+          items: all.items.map(({ key }) => key).sort(),
+          inbox: operator.items.map(({ id }) => id).sort(),
+          events: events.map(({ task_id, newest }) => [task_id, newest]),
+        };
+      };
+      const facts = (payload: string): unknown => {
+        const { facts: read } = JSON.parse(payload) as { facts: Record<string, unknown> };
+        return { ...read, healthSince: null };
+      };
+      const lastFacts = async (): Promise<Map<number | null, string>> =>
+        new Map(
+          (
+            await store.db
+              .selectFrom('event')
+              .select(['task_id', 'payload'])
+              .where('kind', '=', RESTART)
+              .orderBy('id')
+              .execute()
+          ).map(({ task_id, payload }) => [task_id, payload]),
+        );
+      const before = await stable();
+      const factsBefore = await lastFacts();
+      const { newest } = await store.db
+        .selectFrom('event')
+        .select(({ fn }) => fn.max<number>('id').as('newest'))
+        .executeTakeFirstOrThrow();
+      for (let step = 0; step < 12; step += 1) {
+        await ok(current(), '/clock', { shiftMs: 300_000 });
+        await ok(current(), '/poll');
+        await ok(current(), '/wait', { condition: 'outbox-drained', timeoutMs: 10_000 });
+      }
+      const after = await stable();
+      expect(after).toEqual(before);
+      const later = await store.db
+        .selectFrom('event')
+        .select(['task_id', 'kind', 'payload'])
+        .where('id', '>', newest)
+        .where('task_id', 'is not', null)
+        .execute();
+      for (const { task_id, kind, payload } of later) {
+        expect(kind, payload).toBe(RESTART);
+        expect(facts(payload)).toEqual(facts(factsBefore.get(task_id) ?? '{"facts":{}}'));
+      }
+      for (const key of after.items)
+        expect(
+          BANNED.filter((prefix) => key.startsWith(prefix)),
+          key,
+        ).toEqual([]);
+    } finally {
+      await store.close();
+    }
+
+    const demo = readFileSync(DEMO, 'utf8');
+    for (const column of COLUMN_IDS)
+      expect(demo, column).toMatch(new RegExp(`^- \`${column}\``, 'm'));
+    for (const open of [
+      '?open=inbox',
+      '?open=services',
+      `?open=${encodeURIComponent(keyOf('returned'))}`,
+      '?open=block%3A',
+    ])
+      expect(demo, open).toContain(open);
+    expect(demo).toContain('executor line');
+    expect(await ok(current(), '/violations')).toMatchObject({ total: 0 });
+  }, 240_000);
+
+  it('showcase: comes up through the real CLI within the up timeout', async () => {
+    const started = await standCli(['up', '--scenario', 'showcase']);
+    let home: string | undefined;
+    try {
+      expect(started.code, started.stderr).toBe(0);
+      const line = JSON.parse(started.stdout) as { home: string; scenario?: { name: string } };
+      home = line.home;
+      expect(line.scenario?.name).toBe('showcase');
+      const waited = await standCli(['wait', 'scenario', '--home', home]);
+      expect(waited.code, waited.stdout).toBe(0);
+    } finally {
+      if (home !== undefined) {
+        const downed = await standCli(['down', '--home', home]);
+        expect(downed.code, downed.stderr).toBe(0);
+      }
+    }
+  }, 120_000);
 });
