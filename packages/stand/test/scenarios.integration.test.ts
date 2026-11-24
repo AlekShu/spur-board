@@ -22,6 +22,7 @@ import { migrationsDir, openStore } from '@spur-board/core';
 import { sql } from 'kysely';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import YAML from 'yaml';
+import { shellWord } from '../src/guards.ts';
 import { MANIFEST_FILE, readManifest, STAND_PREFIX, type StandManifest } from '../src/manifest.ts';
 import { SCENARIOS, scenarioNames, type Scenario } from '../src/scenarios/index.ts';
 import { SHOWCASE_TASKS } from '../src/scenarios/showcase.ts';
@@ -4227,6 +4228,23 @@ describe('walkthrough scenario', () => {
   );
   const STEPS = SCENARIOS.find(({ name }) => name === 'walkthrough')?.demo ?? [];
   const HEAD_B = createHash('sha1').update('walkthrough-b').digest('hex');
+
+  it('walkthrough: up through the real CLI names the next command on stderr', async () => {
+    const started = await standCli(['up', '--scenario', 'walkthrough']);
+    let home: string | undefined;
+    try {
+      expect(started.code, started.stderr).toBe(0);
+      home = (JSON.parse(started.stdout) as { home: string }).home;
+      expect(started.stderr).toContain(
+        `Next: pnpm stand demo next --home ${shellWord(home)} runs step 1 of ${String(STEPS.length)}`,
+      );
+    } finally {
+      if (home !== undefined) {
+        const downed = await standCli(['down', '--home', home]);
+        expect(downed.code, downed.stderr).toBe(0);
+      }
+    }
+  }, 120_000);
 
   interface Row {
     key: string;

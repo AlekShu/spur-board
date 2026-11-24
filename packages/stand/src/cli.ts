@@ -19,7 +19,14 @@ import { z } from 'zod';
 import { callLocal, DEMO_VERBS, MAX_SHIFT_MS } from './control.ts';
 import { parseFakeArgs } from './fake-spur.ts';
 import { parseFakeHostArgs } from './fakes/host.ts';
-import { liveBoardDirs, proxyRefusal, refusal, StandRefusedError } from './guards.ts';
+import {
+  credentialRefusal,
+  liveBoardDirs,
+  proxyRefusal,
+  refusal,
+  shellWord,
+  StandRefusedError,
+} from './guards.ts';
 import {
   isLive,
   isStandDir,
@@ -43,7 +50,7 @@ import {
   type StandRole,
 } from './roles.ts';
 import { foregroundStop } from './foreground.ts';
-import { scenarioNames } from './scenarios/index.ts';
+import { SCENARIOS, scenarioNames } from './scenarios/index.ts';
 import {
   pickWebPort,
   retryWebPort,
@@ -271,6 +278,18 @@ function publicView(manifest: StandManifest): Record<string, unknown> {
   };
 }
 
+/**
+ * Tells on stderr, keeping the JSON stdout whole, how to run a scenario's demo steps on the stand
+ * at `home`: with `--home`, since another live stand makes a bare `demo next` exit 2.
+ */
+function demoHint(scenario: string | undefined, home: string): void {
+  const steps = SCENARIOS.find(({ name }) => name === scenario)?.demo;
+  if (steps !== undefined && steps.length > 0)
+    err(
+      `Next: pnpm stand demo next --home ${shellWord(home)} runs step 1 of ${String(steps.length)} (docs/contributing/demo-walkthrough.md).\n`,
+    );
+}
+
 /** The name, after checking it is a known scenario. */
 function scenarioName(value: string | undefined): string {
   const names = scenarioNames();
@@ -366,6 +385,8 @@ async function upForeground(options: {
   home?: string;
   detached: boolean;
   watchPid?: number;
+  /** The `pnpm stand` arguments as run, printed back by a credential refusal. */
+  argv: readonly string[];
 }) {
   // With --watch-pid the launcher names the process to outlive; else the parent seen at load.
   let parentGone: () => boolean = () => process.ppid !== STARTUP_PARENT;
@@ -389,6 +410,7 @@ async function upForeground(options: {
       webPort: options.webPort,
       env,
       osHome: homedir(),
+      rerun: options.argv,
     });
   if (refused !== undefined) throw new StandRefusedError(refused);
   // A detached child takes the port its `up` picked, or none.
@@ -454,7 +476,9 @@ async function upForeground(options: {
     throw error;
   }
   if (typeof result === 'number') return result;
-  out(`${JSON.stringify(publicView(result.manifest()))}\n`);
+  const started = result.manifest();
+  out(`${JSON.stringify(publicView(started))}\n`);
+  if (!options.detached) demoHint(options.scenario, started.home);
   return stopper.attach(result);
 }
 
@@ -462,6 +486,7 @@ async function up(
   port: number,
   requestedWebPort: number | undefined,
   scenario: string | undefined,
+  argv: readonly string[],
 ): Promise<number> {
   const dir = root();
   const refused = refusal({
@@ -470,6 +495,7 @@ async function up(
     webPort: requestedWebPort,
     env: process.env,
     osHome: homedir(),
+    rerun: argv,
   });
   if (refused !== undefined) throw new StandRefusedError(refused);
   const webPort = requestedWebPort ?? (await defaultWebPort(port, process.env));
@@ -532,6 +558,7 @@ async function spawnStand(
     const manifest = standAt(home, dir);
     if (manifest !== undefined) {
       out(`${JSON.stringify(publicView(manifest))}\n`);
+      demoHint(scenario, manifest.home);
       return 0;
     }
     await sleep(100);
@@ -1044,7 +1071,7 @@ async function main(argv: string[]): Promise<number> {
           throw new UsageError(
             'up takes --home, --detached, --watch-pid and --live-home only with --foreground',
           );
-        return up(port, webPort, scenario);
+        return up(port, webPort, scenario, argv);
       }
       if (liveHome !== undefined && !values.detached)
         throw new UsageError('--live-home goes only with --detached');
@@ -1060,6 +1087,7 @@ async function main(argv: string[]): Promise<number> {
         ...(scenario === undefined ? {} : { scenario }),
         ...(values.home === undefined ? {} : { home: values.home }),
         detached: values.detached ?? false,
+        argv,
       });
     }
     case 'down':
@@ -1114,6 +1142,9 @@ async function main(argv: string[]): Promise<number> {
         extra.length > 0
       )
         throw new UsageError(`demo takes one of ${DEMO_VERBS.join(', ')}`);
+      // The same credential guard as up, so a demo shell cannot carry real tokens past it.
+      const refused = credentialRefusal(process.env, argv);
+      if (refused !== undefined) throw new StandRefusedError(refused);
       return demo(target(values.home), verb);
     }
     case 'violations':

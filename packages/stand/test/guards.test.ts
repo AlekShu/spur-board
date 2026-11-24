@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { proxyRefusal, refusal } from '../src/guards.ts';
+import { credentialRefusal, proxyRefusal, refusal } from '../src/guards.ts';
 import { liveConfigDir, writeLiveConfig } from './live-config.ts';
 
 let base: string;
@@ -242,6 +242,33 @@ describe('refusal', () => {
     expect(result?.reason).toBe('external_secrets');
     expect(result?.message).toContain(`-u ${name}`);
     expect(result?.message).not.toContain('real-value-123');
+  });
+
+  it('names the command to rerun: up by default, else the arguments given', () => {
+    const env = { GH_TOKEN: 'real', SLACK_BOT_TOKEN: 'real' };
+    expect(refusal({ root, port: 0, env, osHome })?.message).toMatch(
+      / env -u GH_TOKEN -u SLACK_BOT_TOKEN pnpm stand up$/,
+    );
+    expect(
+      refusal({ root, port: 0, env, osHome, rerun: ['up', '--scenario', 'walkthrough'] })?.message,
+    ).toMatch(/ pnpm stand up --scenario walkthrough$/);
+    expect(credentialRefusal(env, ['demo', 'next'])).toEqual({
+      reason: 'external_secrets',
+      message:
+        'The environment holds external credentials: GH_TOKEN, SLACK_BOT_TOKEN. Run the stand without them: env -u GH_TOKEN -u SLACK_BOT_TOKEN pnpm stand demo next',
+    });
+    expect(
+      credentialRefusal({ GH_TOKEN: '', SPUR_SESSION: 's' }, ['demo', 'next']),
+    ).toBeUndefined();
+    // A launcher can set a name no shell would: it is quoted like any argument.
+    expect(
+      credentialRefusal({ 'JIRA_X Y': 'real', GH_TOKEN: 'real' }, [
+        'demo',
+        'next',
+        '--home',
+        '/s/my stand',
+      ])?.message,
+    ).toMatch(/ env -u GH_TOKEN -u 'JIRA_X Y' pnpm stand demo next --home '\/s\/my stand'$/);
   });
 
   it('allows empty credentials and Spur or board names that hold no secret', () => {
