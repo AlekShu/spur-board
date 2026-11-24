@@ -159,6 +159,42 @@ export function externalReviews(pr: PrFacts, agentLogin: string): PrFacts['revie
 }
 
 /**
+ * The pending review requests that can meet a review requirement GitHub still waits for, named by
+ * login or team slug in GitHub's request order; empty unless the rule was read and GitHub reads the
+ * merge blocked. While the rule's approvals are not all given, any user or team request counts;
+ * once they are, only a request GitHub made of a code owner, and only when the rule requires a
+ * code owner review; otherwise none, so a rule with no review requirement waits for nobody, even
+ * for a code owner GitHub requested on its own: its block has another cause. Every reviewer's
+ * latest approval counts as given, on any commit and by any author: that is at least as many as
+ * GitHub counts (a stale approval it dismisses reads as dismissed), so a request it might still
+ * need can be missed but never one it cannot use, and a missed one keeps the immediate item. A
+ * request to a user whose approval already counts never counts: another approval from them adds
+ * none, and an owner's approval already serves the code owner review. Bots and a request stored
+ * by an earlier version without a kind never count.
+ */
+export function awaitedReviewers(
+  pr: Pick<PrFacts, 'mergeState' | 'reviews' | 'reviewRequests'>,
+  rule: ReviewRule | null,
+): string[] {
+  if (rule === null || pr.mergeState !== 'blocked') return [];
+  const approvers = new Set(
+    pr.reviews
+      .filter((review) => review.state === 'approved')
+      .map((review) => review.reviewer.toLowerCase()),
+  );
+  const approvalsMissing = approvers.size < (rule.approvals ?? 0);
+  if (!approvalsMissing && !rule.codeOwners) return [];
+  return pr.reviewRequests.flatMap((request) =>
+    request.id !== undefined &&
+    (request.kind === 'team' ||
+      (request.kind === 'user' && !approvers.has(request.id.toLowerCase()))) &&
+    (approvalsMissing || request.asCodeOwner)
+      ? [request.id]
+      : [],
+  );
+}
+
+/**
  * Changes requested by GitHub's review verdict, or by an external reviewer's latest review. While
  * GitHub has not computed mergeability or the merge state, its verdict does not count, so the head
  * holds as on any unknown read instead of moving the task; a reviewer's latest review always counts, as
