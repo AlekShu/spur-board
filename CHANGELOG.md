@@ -2,6 +2,12 @@
 
 Notable changes in each spur-board release, newest first. A breaking change lists what changed and how to migrate the config under **BREAKING CHANGES**; the versioning policy is in [CONTRIBUTING.md](CONTRIBUTING.md#versions-and-the-changelog). Releases before this file, and any release not listed here, are on the [GitHub releases page](https://github.com/AnDeVerin/spur-board/releases).
 
+## [0.165.3](https://github.com/AnDeVerin/spur-board/compare/v0.165.2...v0.165.3) (2026-11-24)
+
+### Bug Fixes
+
+* **ci:** [#842](https://github.com/AnDeVerin/spur-board/issues/842) fix the mutation dry run and shard the weekly run ([#892](https://github.com/AnDeVerin/spur-board/issues/892)) ([3d69b45](https://github.com/AnDeVerin/spur-board/commit/3d69b45380dd09bbe664b39d2d51b140cae1f421))
+
 ## [0.165.2](https://github.com/AnDeVerin/spur-board/compare/v0.165.1...v0.165.2) (2026-11-23)
 
 ### Bug Fixes
