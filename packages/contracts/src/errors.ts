@@ -194,7 +194,7 @@ export const ERRORS = {
     status: 409,
     exit: EXIT_CODES.refused,
     message: 'The submission basis fields are inconsistent.',
-    hint: 'Use from and a nonblank reason for carried, a nonblank reason for skipped, and from only with carried.',
+    hint: 'Use from and a nonblank reason for carried, a nonblank reason for skipped, and from only with carried; a submit without sha takes only a nonblank reason, no basis or from.',
     recovery: noRetry('Correct the basis fields and submit again.'),
   }),
   submit_source_not_tested: spec('submit_source_not_tested', {
@@ -203,6 +203,13 @@ export const ERRORS = {
     message: 'The source has no tested origin on this task.',
     hint: 'Choose a tested submission SHA on this task, or a carried SHA with a tested origin; otherwise test or explicitly skip with a reason.',
     recovery: noRetry('Choose a source with a tested origin on this task or change the basis.'),
+  }),
+  submit_sha_required: spec('submit_sha_required', {
+    status: 409,
+    exit: EXIT_CODES.refused,
+    message: 'The submit needs a commit SHA.',
+    hint: 'Submit the pull request head; only a turn outside Dev on a task with no linked pull request closes without a commit.',
+    recovery: noRetry('Submit the pull request head.'),
   }),
   head_mismatch: spec('head_mismatch', {
     status: 409,

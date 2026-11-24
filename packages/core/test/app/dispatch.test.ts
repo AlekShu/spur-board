@@ -589,6 +589,11 @@ function board(options: Options = {}) {
       step();
       return apply(registry['task.submit'], { turn, sha }, actor, `key-${String(++keys)}`);
     },
+    /** A submit with no sha and a reason: closes a turn outside Dev on a task with no linked PR. */
+    submitWithoutCommit: (actor: ActorId, turn: string, reason: string) => {
+      step();
+      return apply(registry['task.submit'], { turn, reason }, actor, `key-${String(++keys)}`);
+    },
     ret: (actor: ActorId, turn: string, reason = 'Handle the empty list.') => {
       step();
       return apply(registry['task.return'], { turn, reason }, actor, `key-${String(++keys)}`);
@@ -2522,6 +2527,84 @@ describe('a done ticket without in-flight work', () => {
     const turns = await ctx.turns();
     await ctx.tick();
     expect(await ctx.turns()).toEqual(turns);
+  });
+
+  it.each(['submitted', 'held'] as const)(
+    'closes a ticket_done_no_pr wrap-up without a commit (%s)',
+    async (control) => {
+      const reason = 'Findings are in the ticket; no code change.';
+      const ctx = await started({ doneOrchestrator: 'coord' }, 'none');
+      await ctx.ticket('closed');
+      await ctx.github();
+      await ctx.spur('none');
+      expect((await ctx.moves()).at(-1)).toMatchObject({ reason: 'ticket_done_no_pr' });
+      const wrap = await ctx.openTurn();
+      expect(wrap).toMatchObject({ column: 'done', reason: 'done: wrap up' });
+      const turn = wrap?.id ?? 'T0';
+      const id = Number(turn.slice(1));
+      await ctx.ack(COORD, turn);
+      await ctx.session({ ...sessionFacts('coord-1', 'coord'), health: 'waiting' });
+      if (control === 'submitted') {
+        await expect(ctx.submitWithoutCommit(COORD, turn, reason)).resolves.toMatchObject({
+          task: { column: 'done' },
+          turn,
+          sha: null,
+          status: 'confirmed',
+        });
+        expect((await ctx.why()).submittedWithoutCommit).toMatchObject({
+          turn,
+          reason,
+          text: `submitted without a commit: ${reason}`,
+        });
+      }
+      ctx.wait(IDLE);
+      await ctx.tick();
+      const reminders = await ctx.store.db
+        .selectFrom('notification')
+        .select('turn_id')
+        .where('kind', '=', 'turn_reminder')
+        .execute();
+      if (control === 'submitted') {
+        expect((await ctx.turns()).find((row) => row.id === id)).toMatchObject({
+          closed_reason: 'submitted',
+        });
+        expect(await ctx.openTurn()).toBeNull();
+        expect(reminders).toEqual([]);
+        expect(await ctx.store.db.selectFrom('submission').selectAll().execute()).toEqual([]);
+        expect((await ctx.task()).column).toBe('done');
+      } else {
+        expect(reminders).toEqual([{ turn_id: id }]);
+      }
+    },
+  );
+
+  it('reads a submit without a commit past a malformed task_submitted payload', async () => {
+    const reason = 'Findings are in the ticket; no code change.';
+    const ctx = await started({ doneOrchestrator: 'coord' }, 'none');
+    await ctx.ticket('closed');
+    await ctx.github();
+    await ctx.spur('none');
+    const turn = (await ctx.openTurn())?.id ?? 'T0';
+    await ctx.ack(COORD, turn);
+    await ctx.submitWithoutCommit(COORD, turn, reason);
+    const task = await ctx.task();
+    // A newer row of the task whose payload is not JSON: the lookup skips it.
+    await ctx.store.db
+      .insertInto('event')
+      .values({
+        at: ctx.at(),
+        project: task.project,
+        task_id: task.id,
+        kind: 'task_submitted',
+        actor: 'system',
+        actor_ref: null,
+        payload: '{not json',
+        v: 1,
+        request_id: null,
+        via: null,
+      })
+      .execute();
+    expect((await ctx.why()).submittedWithoutCommit).toMatchObject({ turn, reason });
   });
 
   it('leaves archived tasks untouched', async () => {
