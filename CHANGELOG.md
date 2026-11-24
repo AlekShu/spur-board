@@ -2,6 +2,12 @@
 
 Notable changes in each spur-board release, newest first. A breaking change lists what changed and how to migrate the config under **BREAKING CHANGES**; the versioning policy is in [CONTRIBUTING.md](CONTRIBUTING.md#versions-and-the-changelog). Releases before this file, and any release not listed here, are on the [GitHub releases page](https://github.com/AnDeVerin/spur-board/releases).
 
+## [0.168.0](https://github.com/AnDeVerin/spur-board/compare/v0.167.0...v0.168.0) (2026-11-24)
+
+### Features
+
+* **stand:** [#895](https://github.com/AnDeVerin/spur-board/issues/895) add a walkthrough scenario stepped by pnpm stand demo next ([#897](https://github.com/AnDeVerin/spur-board/issues/897)) ([0f10551](https://github.com/AnDeVerin/spur-board/commit/0f105514efe64f14ba9df0dbdadf40ce13a4f2fa))
+
 ## [0.167.0](https://github.com/AnDeVerin/spur-board/compare/v0.166.0...v0.167.0) (2026-11-24)
 
 ### Features
