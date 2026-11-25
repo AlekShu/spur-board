@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { SocketModeClient } from '@slack/socket-mode';
-import type { WebClient } from '@slack/web-api';
+import { setTimeout as sleep } from 'node:timers/promises';
+import {
+  LogLevel,
+  SocketModeClient,
+  UnrecoverableSocketModeStartError,
+  type Logger,
+} from '@slack/socket-mode';
+import { WebAPIPlatformError, type WebClient } from '@slack/web-api';
 import type { InboundEvent, InboundSink } from '@spur-board/contracts';
 import type { ApiConfig } from './api.ts';
 import { normalizeInteraction, normalizeMessage, type BotIdentity } from './normalize.ts';
@@ -26,19 +32,296 @@ export interface SocketConfig extends ApiConfig {
   command?: string;
   /** Receives every rejection of Socket Mode background work; without it the rejection is dropped. */
   onError?: (err: unknown, work: 'connection' | 'envelope') => void;
+  /** Receives the connection log lines and the SDK's warn and error lines; without it they are dropped. */
+  onLog?: SocketLog;
+  /** Reconnect tuning for tests; the defaults are 1 s doubling to 60 s and a 30 s hello wait. */
+  reconnect?: ReconnectOptions;
 }
 
-/** Socket Mode owns transport reconnects; this layer owns sink-before-ack ordering. */
+export type SocketLog = (
+  level: 'info' | 'warn' | 'error',
+  fields: Record<string, unknown>,
+  msg: string,
+) => void;
+
+export interface ReconnectOptions {
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  helloTimeoutMs?: number;
+}
+
+/** What one connection attempt's SDK logger saw of its socket. */
+export interface SocketRecord {
+  closeCode?: number;
+  closeReason?: string;
+  socketError?: string;
+}
+
+/**
+ * The wait before reconnect attempt `attempt` (1-based): equal jitter over a ceiling that doubles
+ * from `baseDelayMs` up to `maxDelayMs`.
+ */
+export function reconnectDelay(
+  attempt: number,
+  options: { baseDelayMs: number; maxDelayMs: number },
+  random: () => number,
+): number {
+  const ceiling = Math.min(options.maxDelayMs, options.baseDelayMs * 2 ** (attempt - 1));
+  return Math.round(ceiling / 2 + (random() * ceiling) / 2);
+}
+
+const closeFrameLine = /^WebSocket close frame received \(code: (\d+), reason: (.*)\)$/s;
+const socketErrorLine = /^WebSocket error occurred: (.*)$/s;
+// A structured gateway line already carries these facts.
+const carriedLines = [
+  /^Failed to retrieve a new WSS URL/,
+  /^http request failed/,
+  /^WebSocket error! /,
+];
+
+/**
+ * The logger one SDK client gets. Debug and info lines never leave it (they carry payloads and
+ * the WSS URL); it records the close frame and socket error into `record`, and forwards every
+ * other warn and error line as its string arguments joined by a space.
+ */
+export function createSdkLogger(
+  record: SocketRecord,
+  forward: (level: 'warn' | 'error', detail: string) => void,
+): Logger {
+  const detailOf = (args: unknown[]) =>
+    args.filter((arg): arg is string => typeof arg === 'string').join(' ');
+  function line(level: 'warn' | 'error', args: unknown[]): void {
+    const detail = detailOf(args);
+    if (level === 'error') {
+      const socketError = socketErrorLine.exec(detail);
+      if (socketError !== null) {
+        if (socketError[1] !== undefined && socketError[1].length > 0) {
+          record.socketError = socketError[1];
+        }
+        return;
+      }
+    }
+    if (carriedLines.some((pattern) => pattern.test(detail))) return;
+    forward(level, detail);
+  }
+  return {
+    debug(...args: unknown[]) {
+      const frame = closeFrameLine.exec(detailOf(args));
+      if (frame === null) return;
+      record.closeCode = Number(frame[1]);
+      if (frame[2] === undefined || frame[2] === '') delete record.closeReason;
+      else record.closeReason = frame[2];
+    },
+    info() {
+      // Info lines only narrate the connection, which the gateway logs itself.
+    },
+    warn(...args: unknown[]) {
+      line('warn', args);
+    },
+    error(...args: unknown[]) {
+      line('error', args);
+    },
+    getLevel: () => LogLevel.INFO,
+    setLevel() {
+      // The gateway fixes the level.
+    },
+    setName() {
+      // Lines go out under the gateway's own module name.
+    },
+  };
+}
+
+/** The `reason` of a Socket Mode `disconnect` message, else undefined. */
+function disconnectReasonOf(data: unknown): string | undefined {
+  if (typeof data !== 'string' || !data.includes('"disconnect"')) return undefined;
+  try {
+    const message = fieldsOf(JSON.parse(data));
+    return textOf(message?.type) === 'disconnect' ? textOf(message?.reason) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function unrecoverable(err: unknown): boolean {
+  const codes: readonly string[] = Object.values(UnrecoverableSocketModeStartError);
+  return err instanceof WebAPIPlatformError && codes.includes(err.data.error);
+}
+
+type Outcome = 'up' | 'failed' | 'abandoned';
+
+interface Attempt {
+  client: SocketModeClient;
+  /** `connecting` until hello or failure; `up` until its drop is logged or stop cuts it off. */
+  state: 'connecting' | Outcome | 'down';
+  outcome: Promise<Outcome>;
+  /** Resolves when an `up` attempt drops or stop cuts it off. */
+  ended: Promise<void>;
+  /** Settles a connecting attempt as abandoned and ends an up one, emitting nothing. */
+  abandon(): void;
+  /** Resolves once the client holds no socket. */
+  closed(): Promise<void>;
+}
+
+/**
+ * The gateway owns transport reconnects: every drop after an `up` schedules attempts with
+ * jittered backoff until `stop()`, each on a fresh SDK client with its reconnect turned off. This
+ * layer also owns sink-before-ack ordering.
+ */
 export function createSocket(
   api: WebClient,
   config: SocketConfig,
   botIdentity: () => Promise<BotIdentity>,
 ): Pick<import('@spur-board/contracts').Gateway, 'start' | 'stop'> {
-  let socket: SocketModeClient | undefined;
+  const baseDelayMs = config.reconnect?.baseDelayMs ?? 1000;
+  const maxDelayMs = config.reconnect?.maxDelayMs ?? 60_000;
+  const helloTimeoutMs = config.reconnect?.helloTimeoutMs ?? 30_000;
+  let started = false;
+  let current: Attempt | undefined;
+  let supervisor: Promise<void> | undefined;
+  let halt = new AbortController();
   let sink: InboundSink | undefined;
   let stopping = false;
-  let connected = false;
   const pending = new Set<Promise<void>>();
+
+  function log(level: 'info' | 'warn' | 'error', fields: Record<string, unknown>, msg: string) {
+    try {
+      config.onLog?.(level, fields, msg);
+    } catch {
+      // A broken log callback must not break the connection loop.
+    }
+  }
+
+  function connectionEvent(state: 'up' | 'down'): void {
+    track(
+      emit({ kind: 'connection', state, dedupeKey: `slack:connection:${randomUUID()}` }),
+      'connection',
+    );
+  }
+
+  /** One connection attempt on a fresh client; `number` is 0 for the first start. */
+  function connect(appToken: string, number: number): Attempt {
+    const record: SocketRecord = {};
+    let disconnectReason: string | undefined;
+    const outcome = Promise.withResolvers<Outcome>();
+    const ended = Promise.withResolvers<undefined>();
+    let closing: Promise<void> = Promise.resolve();
+    // A failed or abandoned attempt, or an up one whose drop is logged, says nothing more.
+    const quiet = () => attempt.state !== 'connecting' && attempt.state !== 'up';
+    const client = new SocketModeClient({
+      appToken,
+      autoReconnectEnabled: false,
+      logger: createSdkLogger(record, (level, detail) => {
+        if (!quiet()) log(level, { detail }, 'slack socket-mode sdk');
+      }),
+      clientOptions: {
+        retryConfig: { retries: 0 },
+        rejectRateLimitedCalls: true,
+        timeout: config.requestTimeoutMs ?? 10_000,
+        ...(config.apiUrl === undefined ? {} : { slackApiUrl: config.apiUrl }),
+      },
+    });
+    const socketFields = () => ({
+      ...(disconnectReason === undefined ? {} : { disconnectReason }),
+      closeCode: record.closeCode ?? 1006,
+      ...(record.closeReason === undefined ? {} : { closeReason: record.closeReason }),
+      ...(record.socketError === undefined ? {} : { socketError: record.socketError }),
+    });
+    function fail(fields: Record<string, unknown>, err?: unknown): void {
+      if (attempt.state !== 'connecting') return;
+      attempt.state = 'failed';
+      clearTimeout(helloTimer);
+      log(
+        unrecoverable(err) ? 'error' : 'warn',
+        { attempt: number, ...fields, ...(err === undefined ? {} : { err }) },
+        'slack socket attempt failed',
+      );
+      outcome.resolve('failed');
+    }
+    const attempt: Attempt = {
+      client,
+      state: 'connecting',
+      outcome: outcome.promise,
+      ended: ended.promise,
+      abandon() {
+        if (attempt.state === 'connecting') {
+          clearTimeout(helloTimer);
+          outcome.resolve('abandoned');
+        }
+        if (attempt.state === 'connecting' || attempt.state === 'up') {
+          attempt.state = 'abandoned';
+          closing = client.disconnect();
+        }
+        ended.resolve(undefined);
+      },
+      closed: () => closing,
+    };
+    const helloTimer = setTimeout(() => {
+      fail({ failure: 'hello_timeout' });
+      // The state is failed first, so the `disconnected` this emits is ignored.
+      closing = client.disconnect();
+    }, helloTimeoutMs);
+    client.on('ws_message', (data: unknown) => {
+      disconnectReason = disconnectReasonOf(data) ?? disconnectReason;
+    });
+    client.on('connected', () => {
+      if (attempt.state !== 'connecting') return;
+      attempt.state = 'up';
+      clearTimeout(helloTimer);
+      log('info', { attempt: number }, 'slack socket up');
+      connectionEvent('up');
+      outcome.resolve('up');
+    });
+    client.on('disconnected', () => {
+      if (attempt.state === 'connecting') {
+        fail({ failure: 'closed_before_hello', ...socketFields() });
+        return;
+      }
+      if (attempt.state !== 'up') return;
+      log('warn', socketFields(), 'slack socket down');
+      attempt.state = 'down';
+      connectionEvent('down');
+      ended.resolve(undefined);
+    });
+    client.on('slack_event', (envelope: Envelope) => {
+      if (attempt.state === 'up') track(handle(envelope), 'envelope');
+    });
+    // Its result is read from the events above; an abandoned start settles unobserved.
+    client.start().catch((err: unknown) => {
+      fail({ failure: 'connections_open' }, err);
+    });
+    return attempt;
+  }
+
+  /** Reconnects after every drop until stop; stopping is its only exit. */
+  async function supervise(appToken: string, first: Attempt): Promise<void> {
+    let live = first;
+    for (;;) {
+      await live.ended;
+      let attempt = 0;
+      while (!stopping) {
+        attempt += 1;
+        const delayMs = reconnectDelay(attempt, { baseDelayMs, maxDelayMs }, Math.random);
+        log('info', { attempt, delayMs }, 'slack socket reconnecting');
+        try {
+          await sleep(delayMs, undefined, { signal: halt.signal, ref: false });
+        } catch {
+          return;
+        }
+        // The sleep may have finished in the turn stop() aborted it.
+        if (halt.signal.aborted) return;
+        const next = connect(appToken, attempt);
+        current = next;
+        const outcome = await next.outcome;
+        if (outcome === 'up') {
+          live = next;
+          break;
+        }
+        // At most one live socket: a timed-out attempt closes before the next one opens.
+        await next.closed();
+      }
+      if (stopping) return;
+    }
+  }
 
   function track(work: Promise<void>, kind: 'connection' | 'envelope'): void {
     pending.add(work);
@@ -107,60 +390,39 @@ export function createSocket(
 
   return {
     async start(nextSink) {
-      if (socket !== undefined) throw new Error('Slack gateway already started');
+      if (started) throw new Error('Slack gateway already started');
       sink = nextSink;
       stopping = false;
-      if (config.appToken === undefined) return;
+      const appToken = config.appToken;
+      if (appToken === undefined) return;
       await botIdentity();
-      const client = new SocketModeClient({
-        appToken: config.appToken,
-        autoReconnectEnabled: true,
-        clientOptions: {
-          retryConfig: { retries: 0 },
-          rejectRateLimitedCalls: true,
-          timeout: config.requestTimeoutMs ?? 10_000,
-          ...(config.apiUrl === undefined ? {} : { slackApiUrl: config.apiUrl }),
-        },
-      });
-      socket = client;
-      client.on('connected', () => {
-        connected = true;
-        track(
-          emit({ kind: 'connection', state: 'up', dedupeKey: `slack:connection:${randomUUID()}` }),
-          'connection',
-        );
-      });
-      client.on('close', () => {
-        if (!connected || stopping) return;
-        connected = false;
-        track(
-          emit({
-            kind: 'connection',
-            state: 'down',
-            dedupeKey: `slack:connection:${randomUUID()}`,
-          }),
-          'connection',
-        );
-      });
-      client.on('slack_event', (envelope: Envelope) => {
-        track(handle(envelope), 'envelope');
-      });
-      try {
-        await client.start();
-      } catch {
-        socket = undefined;
+      started = true;
+      halt = new AbortController();
+      const first = connect(appToken, 0);
+      current = first;
+      // The first start fails fast; only later drops are retried.
+      if ((await first.outcome) !== 'up') {
+        await first.closed();
+        started = false;
+        current = undefined;
         sink = undefined;
         throw new Error('Slack Socket Mode start failed');
       }
+      supervisor = supervise(appToken, first);
     },
     async stop() {
       stopping = true;
-      const client = socket;
-      socket = undefined;
-      if (client !== undefined) await client.disconnect();
+      halt.abort();
+      const attempt = current;
+      current = undefined;
+      // Never waits for an in-flight apps.connections.open: an abandoned client opens no socket.
+      attempt?.abandon();
+      await attempt?.closed();
+      await supervisor;
+      supervisor = undefined;
       while (pending.size > 0) await Promise.allSettled([...pending]);
       sink = undefined;
-      connected = false;
+      started = false;
     },
   };
 }

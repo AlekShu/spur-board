@@ -96,12 +96,27 @@ without using up their 30-minute retry window.
 A socket outage shorter than 5 minutes does not show. Without `SLACK_APP_TOKEN` there is no
 socket, so only permanent failures show.
 
+After the socket drops, the daemon reconnects on its own until it stops: the first attempt
+waits about a second, and each failed attempt doubles the wait up to a minute. Slack also asks
+for a new connection now and then (`disconnectReason: refresh_requested`); that drop is
+followed by `slack socket up` within seconds. The log lines under `module: gateway-slack`:
+
+- `slack socket down` (warn): the connection dropped, with `disconnectReason` when Slack sent
+  one, `closeCode` (1006 when the connection was cut without a close frame) and `socketError`
+  when the socket reported one.
+- `slack socket reconnecting` (info): an attempt is due, with its `attempt` number and
+  `delayMs`.
+- `slack socket attempt failed` (warn, error for a token Slack refuses): an attempt did not
+  connect, with `failure` (`connections_open`, `closed_before_hello` or `hello_timeout`) and
+  `err`.
+- `slack socket up` (info): connected, with the `attempt` that did it (0 at start).
+
 **Check.**
 
 ```sh
 board status
 board doctor
-journalctl --user -u spur-board.service --since -1h
+journalctl --user -u spur-board.service --since -1h | grep 'slack socket'
 ```
 
 Read `transport` and the reason first, then the `slack.auth`, `slack.orchestrators_member`

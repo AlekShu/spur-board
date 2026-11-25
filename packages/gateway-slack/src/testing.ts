@@ -45,6 +45,22 @@ export interface FakeSlackApi {
   networkErrorNext(): void;
   searchUnknownNext(): void;
   holdNextWrite(): { entered: Promise<void>; release(): void };
+  /**
+   * Send a Socket Mode `disconnect` with `reason` on the live socket, wait up to 10 s for the next
+   * socket to get its hello, then close the old socket if it is still open; resolves once it closed.
+   */
+  disconnectWith(reason: string): Promise<void>;
+  /** Drop the live socket without a close frame; later sockets are still accepted. */
+  terminateConnection(): Promise<void>;
+  /**
+   * Fault the next `apps.connections.open` requests in order, before any `respondNext` fault:
+   * `network` destroys the request, a response answers with it, `hold` answers normally after
+   * `release()`. `entered` resolves when the first held request arrives.
+   */
+  failConnectionsOpen(faults: readonly ConnectionsOpenFault[]): {
+    entered: Promise<void>;
+    release(): void;
+  };
   close(): Promise<void>;
   /** Send a raw Socket Mode envelope and wait for its acknowledgement when connected. */
   emitEnvelope(type: string, payload: object, retryAttempt?: number): Promise<void>;
@@ -60,6 +76,9 @@ export interface FakeSlackState {
   done: string[];
   lastMicros: number;
 }
+
+/** A fault `FakeSlackApi.failConnectionsOpen` applies to one `apps.connections.open`. */
+export type ConnectionsOpenFault = 'network' | 'hold' | { status: number; body?: object };
 
 type Fault =
   | { kind: 'response'; status: number; body: object; headers: Record<string, string> }
@@ -121,6 +140,9 @@ export async function startFakeSlackApi(
   let nextSearchUnknown = false;
   let timeout: { remaining: number; visible: boolean } | undefined;
   let hold: { entered: () => void; waiting: Promise<void> } | undefined;
+  const openFaults: { fault: ConnectionsOpenFault; entered: () => void; waiting: Promise<void> }[] =
+    [];
+  const openHolds = new Set<() => void>();
   let lastMicros = 0;
   let nextEnvelope = 0;
   let connected: WebSocket | undefined;
@@ -187,6 +209,22 @@ export async function startFakeSlackApi(
     requests.push({ method, params });
     const write =
       method === 'chat.postMessage' || method === 'chat.update' || method === 'reactions.add';
+    const openFault = method === 'apps.connections.open' ? openFaults.shift() : undefined;
+    if (openFault !== undefined) {
+      const { fault } = openFault;
+      if (fault === 'network') {
+        req.socket.destroy();
+        return;
+      }
+      if (fault === 'hold') {
+        openFault.entered();
+        await openFault.waiting;
+        if (!res.destroyed) reply(res, 200, connectionsOpenResult());
+        return;
+      }
+      reply(res, fault.status, fault.body ?? { ok: false, error: 'fake_error' });
+      return;
+    }
     const fault = nextFault;
     if (fault !== undefined) {
       nextFault = undefined;
@@ -320,7 +358,7 @@ export async function startFakeSlackApi(
         result = { ok: true, user_id: 'U_BOT', bot_id: 'B_FAKE', team_id: 'T_FAKE' };
         break;
       case 'apps.connections.open':
-        result = { ok: true, url: `ws://127.0.0.1:${String(address.port)}/socket` };
+        result = connectionsOpenResult();
         break;
       case 'chat.postEphemeral':
         result = { ok: true, message_ts: ts() };
@@ -339,6 +377,27 @@ export async function startFakeSlackApi(
       return;
     }
     reply(res, 200, result);
+  }
+
+  function connectionsOpenResult(): object {
+    return { ok: true, url: `ws://127.0.0.1:${String(address.port)}/socket` };
+  }
+
+  /** Resolves when the next socket gets its hello, or after `ms`. */
+  function nextActivation(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        connectedWaiters.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      connectedWaiters.add(done);
+    });
+  }
+
+  async function closed(ws: WebSocket): Promise<void> {
+    if (ws.readyState !== WebSocket.CLOSED) await once(ws, 'close');
   }
 
   const server = createServer((req, res) => {
@@ -621,8 +680,43 @@ export async function startFakeSlackApi(
       };
       return { entered: entered.promise, release };
     },
+    async disconnectWith(reason) {
+      const ws = connected;
+      if (ws === undefined) throw new Error('no Socket Mode connection to disconnect');
+      const activated = nextActivation(10_000);
+      ws.send(JSON.stringify({ type: 'disconnect', reason, debug_info: { host: 'fake' } }));
+      await activated;
+      if (ws.readyState === WebSocket.OPEN) ws.close();
+      await closed(ws);
+    },
+    async terminateConnection() {
+      const ws = connected;
+      if (ws === undefined) throw new Error('no Socket Mode connection to terminate');
+      ws.terminate();
+      await closed(ws);
+    },
+    failConnectionsOpen(faults) {
+      const entered = Promise.withResolvers<undefined>();
+      const released = Promise.withResolvers<undefined>();
+      const release = () => {
+        openHolds.delete(release);
+        released.resolve(undefined);
+      };
+      openHolds.add(release);
+      for (const fault of faults) {
+        openFaults.push({
+          fault,
+          entered: () => {
+            entered.resolve(undefined);
+          },
+          waiting: released.promise,
+        });
+      }
+      return { entered: entered.promise, release };
+    },
     async close() {
       acceptSocket = false;
+      openFaults.length = 0;
       for (const ws of sockets.clients) ws.terminate();
       await new Promise<void>((resolve) => {
         sockets.close(() => {
@@ -630,6 +724,8 @@ export async function startFakeSlackApi(
         });
       });
       server.closeAllConnections();
+      // Held requests lost their sockets above; releasing them lets their handlers finish.
+      for (const release of openHolds) release();
       await new Promise<undefined>((resolve, reject) => {
         server.close((error) => {
           if (error === undefined) resolve(undefined);
