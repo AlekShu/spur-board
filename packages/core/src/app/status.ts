@@ -23,6 +23,7 @@ import { itemSubjects } from './items.ts';
 import { awaitedReviewersOf } from './review-rule.ts';
 import { latestQaSubmissions, latestSubmissions } from './submissions.ts';
 import { readOutageEnds, services } from './status-services.ts';
+import { readConnections } from './transport-connection.ts';
 import {
   columnGroupViews,
   orderTodoGroupRows,
@@ -506,6 +507,7 @@ export async function getStatus(
       daemon,
       transport,
       outageEnds: await readOutageEnds(store.db),
+      connections: await readConnections(store.db),
       sources,
     }),
     transport,

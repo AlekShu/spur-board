@@ -23,7 +23,7 @@ afterEach(async () => {
 });
 
 describe('in-process Slack socket', () => {
-  it('reconnects the Slack socket after a drop and raises one transport item past five minutes', async () => {
+  it('reconnects the Slack socket after a drop, raises one transport item past five minutes and reports lastGoodAt', async () => {
     const fake = await startFakeSlackApi();
     const lines: string[] = [];
     const config = await webConfig(configFor);
@@ -63,11 +63,21 @@ describe('in-process Slack socket', () => {
           .select('cleared_at')
           .where('item_key', '=', 'transport:slack')
           .execute();
+      const record = async () => {
+        const row = await running.store.db
+          .selectFrom('meta')
+          .select('value')
+          .where('key', '=', 'transport_connection:slack')
+          .executeTakeFirst();
+        return row === undefined ? undefined : (JSON.parse(row.value) as unknown);
+      };
+      const iso = () => new Date(now).toISOString();
       await vi.waitFor(() => {
         expect(socketLines('slack socket up')).toHaveLength(1);
       });
-      expect((await slack())?.state).toBe('healthy');
+      expect(await slack()).toMatchObject({ state: 'healthy', lastGoodAt: iso() });
 
+      const droppedAt = iso();
       await fake.platform.dropConnection();
       // The fake closes without a code, which the client reads as 1005.
       await vi.waitFor(() => {
@@ -75,14 +85,18 @@ describe('in-process Slack socket', () => {
           expect.objectContaining({ level: 40, closeCode: 1005 }),
         ]);
       });
-      expect((await slack())?.state).toBe('healthy');
+      await vi.waitFor(async () => {
+        expect(await record()).toEqual({ state: 'down', at: droppedAt });
+      });
+      now += 1000;
+      expect(await slack()).toMatchObject({ state: 'healthy', lastGoodAt: droppedAt });
 
       now += 5 * 60_000 + 1000;
       await running.outbox.pulse();
       expect(await items()).toEqual([{ cleared_at: null }]);
       await running.outbox.pulse();
       expect(await items()).toEqual([{ cleared_at: null }]);
-      expect((await slack())?.state).toBe('failing');
+      expect(await slack()).toMatchObject({ state: 'failing', lastGoodAt: droppedAt });
 
       await fake.platform.restoreConnection();
       await vi.waitFor(async () => {
@@ -90,7 +104,8 @@ describe('in-process Slack socket', () => {
         expect(socketLines('slack socket up')).toHaveLength(2);
       });
       expect(socketLines('slack socket reconnecting').length).toBeGreaterThan(0);
-      expect((await slack())?.state).toBe('healthy');
+      now += 1000;
+      expect(await slack()).toMatchObject({ state: 'healthy', lastGoodAt: iso() });
       expect(await running.stop()).toBe(0);
     } finally {
       await fake.close();

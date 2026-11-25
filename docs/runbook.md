@@ -93,6 +93,10 @@ Both clear on their own: a lost connection clears when the socket reconnects, an
 permanent failure clears when a probe send succeeds. While a space is held, its messages wait
 without using up their 30-minute retry window.
 
+The `slack` row under `services` shows `lastGoodAt`: the time of the read while the socket is
+connected, otherwise when it was last known connected. During a drop it stays at the drop
+time, also while the drop is too short to show in `transport`.
+
 A socket outage shorter than 5 minutes does not show. Without `SLACK_APP_TOKEN` there is no
 socket, so only permanent failures show.
 

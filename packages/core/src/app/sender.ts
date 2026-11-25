@@ -19,6 +19,7 @@ import type { Trx } from './board-utils.ts';
 import { insertConversation } from './conversations.ts';
 import { recordRingDelivery, ringStillCurrent, ringTask, ringUndelivered } from './doorbells.ts';
 import { expireTokenOfItem } from './tokens.ts';
+import { writeConnection } from './transport-connection.ts';
 import { ringDue } from './quiet-turns.ts';
 import { clearItem, feedLineBody, raiseItem, resolvedFeedBody, tokenCardBody } from './feed.ts';
 import {
@@ -69,7 +70,10 @@ export interface Sender {
   tick(signal?: AbortSignal): Promise<void>;
   /**
    * Feeds the gateway's connection events; down for over 5 min raises health for every space,
-   * once per outage. `up` clears the down health. Runs between ticks, never inside one.
+   * once per outage. `up` clears the down health. Runs between ticks, never inside one. Each `up`
+   * and the first `down` of an outage are stored as the gateway's connection record (meta
+   * `transport_connection:<gateway>`, `transport-connection.ts`), which `status.get` reads for
+   * the gateway's `lastGoodAt`.
    */
   recordConnection(state: ConnectionState, at: Date): Promise<void>;
 }
@@ -1033,7 +1037,13 @@ export function createSender(options: SenderOptions): Sender {
     recordConnection(state, at) {
       const run = ticking.then(async () => {
         if (state === 'down') {
-          downSince ??= at.getTime();
+          if (downSince !== undefined) return;
+          downSince = at.getTime();
+          if (gateway === undefined) return;
+          // Only the first drop of an outage is stored: it is when the connection was last good.
+          await scanTransaction(store, options.config, (trx) =>
+            writeConnection(trx, gatewayKind, 'down', at),
+          );
           return;
         }
         downSince = undefined;
@@ -1041,6 +1051,7 @@ export function createSender(options: SenderOptions): Sender {
         if (gateway === undefined) return;
         // A permanent-failure row stays: only a probe that delivers clears it.
         await scanTransaction(store, options.config, async (trx) => {
+          await writeConnection(trx, gatewayKind, 'up', at);
           const cleared = await trx
             .deleteFrom('transport_health')
             .where('gateway', '=', gatewayKind)

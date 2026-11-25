@@ -39,6 +39,7 @@ import {
   renderBody,
 } from '../../src/app/outbox.ts';
 import { HEALTH_PROBE_MS, retryTransport, SpurRejectedError } from '../../src/app/sender.ts';
+import { getStatus } from '../../src/app/status.ts';
 import {
   observeGateway,
   observeSpur,
@@ -2362,5 +2363,73 @@ describe('transport health', () => {
         retryTransport(trx, gateway, ctx.fake.platform.now().toISOString()),
       ),
     ).toBe(0);
+  });
+
+  it('records the last connection state and status reports the gateway lastGoodAt', async () => {
+    const ctx = setup();
+    const kind = ctx.observed.gateway.kind;
+    const iso = () => ctx.fake.platform.now().toISOString();
+    const started = new Date(ctx.fake.platform.now().getTime() - 1000).toISOString();
+    const read = async (startedAt = started) => {
+      const status = await getStatus({
+        store: ctx.store,
+        config: testConfig,
+        clock: { now: () => ctx.fake.platform.now().getTime() },
+        completeSince: new Map(),
+        gateways: [kind],
+        daemon: { version: 'test', startedAt, lastDispatchAt: null },
+      });
+      return status.services.find((row) => row.service === kind);
+    };
+    const record = async () =>
+      (
+        await ctx.store.db
+          .selectFrom('meta')
+          .select('value')
+          .where('key', '=', `transport_connection:${kind}`)
+          .executeTakeFirst()
+      )?.value;
+    expect((await read())?.lastGoodAt).toBeNull();
+
+    await ctx.sender.recordConnection('up', ctx.fake.platform.now());
+    expect(JSON.parse((await record()) ?? 'null')).toEqual({ state: 'up', at: iso() });
+    ctx.fake.platform.advance(1000);
+    expect(await read()).toMatchObject({ state: 'healthy', lastGoodAt: iso() });
+
+    // The socket is up while delivery fails for good: the row is failing, the connection good.
+    await enqueueOpen(ctx, await seedBlock(ctx));
+    ctx.fake.platform.failNextPermanently({ scope: 'transport', reason: 'token_revoked' });
+    await ctx.sender.tick();
+    ctx.fake.platform.advance(1000);
+    expect(await read()).toMatchObject({
+      state: 'failing',
+      reason: 'token_revoked',
+      lastGoodAt: iso(),
+    });
+
+    ctx.fake.platform.advance(1000);
+    const droppedAt = iso();
+    await ctx.sender.recordConnection('down', ctx.fake.platform.now());
+    expect(JSON.parse((await record()) ?? 'null')).toEqual({ state: 'down', at: droppedAt });
+    ctx.fake.platform.advance(1000);
+    expect((await read())?.lastGoodAt).toBe(droppedAt);
+    // A second down of the same outage keeps the first drop time.
+    await ctx.sender.recordConnection('down', ctx.fake.platform.now());
+    ctx.fake.platform.advance(1000);
+    expect((await read())?.lastGoodAt).toBe(droppedAt);
+
+    const upAt = iso();
+    await ctx.sender.recordConnection('up', ctx.fake.platform.now());
+    ctx.fake.platform.advance(1000);
+    expect((await read())?.lastGoodAt).toBe(iso());
+    // A later daemon run that has not connected yet reports the last connect of the earlier run.
+    expect((await read(iso()))?.lastGoodAt).toBe(upAt);
+
+    await ctx.store.db
+      .updateTable('meta')
+      .set({ value: '{"state":"up"}' })
+      .where('key', '=', `transport_connection:${kind}`)
+      .execute();
+    expect((await read())?.lastGoodAt).toBeNull();
   });
 });
