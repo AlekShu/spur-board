@@ -48,9 +48,13 @@ export interface FakeSlackApi {
   /**
    * Send a Socket Mode `disconnect` with `reason` on the live socket, wait up to 10 s for the next
    * socket to get its hello, then close the old socket if it is still open; resolves once it closed.
-   * With `wait: false` it resolves once the message is sent and leaves the old socket open.
+   * With `wait: false` it resolves once the message is sent and leaves the old socket open. The
+   * result sends envelopes on the old socket, rejecting once it is closed.
    */
-  disconnectWith(reason: string, options?: { wait?: boolean }): Promise<void>;
+  disconnectWith(
+    reason: string,
+    options?: { wait?: boolean },
+  ): Promise<{ emitEnvelope(type: string, payload: object): Promise<void> }>;
   /** How many Socket Mode connections are open, the live one included. */
   openSockets(): number;
   /** Drop the live socket without a close frame; later sockets are still accepted. */
@@ -175,8 +179,13 @@ export async function startFakeSlackApi(
     res.end(JSON.stringify(body));
   }
 
-  function send(type: string, payload: object, retryAttempt?: number): Promise<void> {
-    if (connected?.readyState !== WebSocket.OPEN) return Promise.resolve();
+  function send(
+    type: string,
+    payload: object,
+    retryAttempt?: number,
+    ws: WebSocket | undefined = connected,
+  ): Promise<void> {
+    if (ws?.readyState !== WebSocket.OPEN) return Promise.resolve();
     nextEnvelope += 1;
     const envelopeId = `E${String(nextEnvelope)}`;
     const ack = Promise.withResolvers<undefined>();
@@ -189,7 +198,7 @@ export async function startFakeSlackApi(
       payload,
       ...(retryAttempt === undefined ? {} : { retry_attempt: retryAttempt }),
     };
-    connected.send(JSON.stringify(envelope));
+    ws.send(JSON.stringify(envelope));
     inFlight.add(ack.promise);
     void ack.promise.finally(() => inFlight.delete(ack.promise));
     return ack.promise;
@@ -686,16 +695,25 @@ export async function startFakeSlackApi(
     async disconnectWith(reason, { wait = true } = {}) {
       const ws = connected;
       if (ws === undefined) throw new Error('no Socket Mode connection to disconnect');
+      const old = {
+        emitEnvelope(type: string, payload: object): Promise<void> {
+          if (ws.readyState !== WebSocket.OPEN) {
+            return Promise.reject(new Error('Socket Mode connection is not open'));
+          }
+          return send(type, payload, undefined, ws);
+        },
+      };
       const message = JSON.stringify({ type: 'disconnect', reason, debug_info: { host: 'fake' } });
       if (!wait) {
         ws.send(message);
-        return;
+        return old;
       }
       const activated = nextActivation(10_000);
       ws.send(message);
       await activated;
       if (ws.readyState === WebSocket.OPEN) ws.close();
       await closed(ws);
+      return old;
     },
     openSockets: () => [...sockets.clients].filter((ws) => ws.readyState === WebSocket.OPEN).length,
     async terminateConnection() {

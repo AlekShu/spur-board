@@ -3,12 +3,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSlackGateway } from '../src/index.ts';
 import { createSdkLogger, reconnectDelay, type SocketRecord } from '../src/socket.ts';
 import { startFakeSlackApi, type FakeSlackApi } from '@spur-board/gateway-slack/testing';
+import {
+  command,
+  fast,
+  lines,
+  opens,
+  reconnecting,
+  stopReconnecting,
+  unhandledSpy,
+} from './support/socket.ts';
 
 const fakes: FakeSlackApi[] = [];
 const gateways: Gateway[] = [];
 afterEach(async () => {
   for (const gateway of gateways.splice(0)) await gateway.stop();
   for (const fake of fakes.splice(0)) await fake.close();
+  await stopReconnecting();
 });
 
 type OnError = (err: unknown, work: 'connection' | 'envelope') => void;
@@ -33,14 +43,6 @@ function rejectConnectionsAndCommands(event: InboundEvent): Promise<void> {
     ? Promise.reject(new Error('sink down'))
     : Promise.resolve();
 }
-
-const command = {
-  user_id: 'U_OPERATOR',
-  channel_id: 'C_ORCH',
-  text: 'status',
-  trigger_id: 'T-1',
-  command: '/board',
-};
 
 describe('Socket Mode background errors', () => {
   it('reports a rejected connection event as connection work', async () => {
@@ -127,73 +129,6 @@ describe('Socket Mode background errors', () => {
   });
 });
 
-interface LogCall {
-  level: 'info' | 'warn' | 'error';
-  fields: Record<string, unknown>;
-  msg: string;
-}
-
-/** A started gateway that records its connection events and log lines. */
-async function reconnecting(
-  options: {
-    reconnect?: { baseDelayMs?: number; maxDelayMs?: number; helloTimeoutMs?: number };
-    requestTimeoutMs?: number;
-  } = {},
-) {
-  const fake = await startFakeSlackApi();
-  fakes.push(fake);
-  const events: ('up' | 'down')[] = [];
-  const inbound: InboundEvent['kind'][] = [];
-  const logs: LogCall[] = [];
-  const gateway = createSlackGateway({
-    token: 'xoxb-test',
-    now: () => Date.now(),
-    appToken: 'xapp-test',
-    channels: { orchestrators: 'C_ORCH', feed: 'C_FEED' },
-    apiUrl: fake.url,
-    onLog: (level, fields, msg) => {
-      logs.push({ level, fields, msg });
-    },
-    ...options,
-  });
-  gateways.push(gateway);
-  await gateway.start((event) => {
-    if (event.kind === 'connection') events.push(event.state);
-    else inbound.push(event.kind);
-    return Promise.resolve();
-  });
-  return { fake, gateway, events, inbound, logs };
-}
-
-function opens(fake: FakeSlackApi): number {
-  return fake.requests().filter((request) => request.method === 'apps.connections.open').length;
-}
-
-function lines(logs: readonly LogCall[], msg: string): LogCall[] {
-  return logs.filter((line) => line.msg === msg);
-}
-
-function unhandledSpy() {
-  const unhandled = vi.fn();
-  process.on('unhandledRejection', unhandled);
-  return {
-    unhandled,
-    off: () => {
-      process.off('unhandledRejection', unhandled);
-    },
-  };
-}
-
-const fast = { baseDelayMs: 20, maxDelayMs: 80 };
-
-/** What one refresh handover case gets once the replacement's apps.connections.open is faulted. */
-interface Handover {
-  fake: FakeSlackApi;
-  hold: { release(): void };
-  events: readonly ('up' | 'down')[];
-  logs: readonly LogCall[];
-}
-
 describe('Socket Mode reconnect', () => {
   it('reconnectDelay doubles from 1 s to a 60 s cap with equal jitter', () => {
     const options = { baseDelayMs: 1000, maxDelayMs: 60_000 };
@@ -258,92 +193,6 @@ describe('Socket Mode reconnect', () => {
       { attempt: 0 },
       { attempt: 1 },
     ]);
-  });
-
-  it.each([
-    {
-      path: 'the replacement connects: the old socket serves meanwhile and closes after',
-      fault: 'hold',
-      async run({ fake, hold, logs }: Handover) {
-        await expect(fake.emitEnvelope('slash_commands', command)).resolves.toBeUndefined();
-        hold.release();
-        await vi.waitFor(() => {
-          expect(lines(logs, 'slack socket refreshed')).toHaveLength(1);
-          expect(fake.openSockets()).toBe(1);
-        });
-      },
-      events: ['up'],
-      opens: 1,
-    },
-    {
-      path: 'the replacement fails: the old socket serves until the server closes it',
-      fault: 'network',
-      async run({ fake, events, logs }: Handover) {
-        await vi.waitFor(() => {
-          expect(lines(logs, 'slack socket attempt failed')).toHaveLength(1);
-        });
-        await expect(fake.emitEnvelope('slash_commands', command)).resolves.toBeUndefined();
-        expect(events).toEqual(['up']);
-        await fake.terminateConnection();
-      },
-      events: ['up', 'down', 'up'],
-      opens: 2,
-    },
-    {
-      path: 'the old socket drops first: the replacement in flight becomes the next attempt',
-      fault: 'hold',
-      async run({ fake, hold, events }: Handover) {
-        await fake.terminateConnection();
-        await vi.waitFor(() => {
-          expect(events).toEqual(['up', 'down']);
-        });
-        hold.release();
-      },
-      events: ['up', 'down', 'up'],
-      opens: 1,
-    },
-  ] as const)('on a refresh_requested, $path', async (row) => {
-    const { fake, events, inbound, logs } = await reconnecting({ reconnect: fast });
-    const before = opens(fake);
-    const hold = fake.failConnectionsOpen([row.fault]);
-    await fake.disconnectWith('refresh_requested', { wait: false });
-    if (row.fault === 'hold') await hold.entered;
-    await row.run({ fake, hold, events, logs });
-    await vi.waitFor(() => {
-      expect(events).toEqual(row.events);
-    });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(events).toEqual(row.events);
-    expect(opens(fake)).toBe(before + row.opens);
-    expect(lines(logs, 'slack socket refreshing').map((line) => line.fields)).toEqual([
-      { disconnectReason: 'refresh_requested' },
-    ]);
-    await expect(fake.emitEnvelope('slash_commands', command)).resolves.toBeUndefined();
-    expect(inbound.filter((kind) => kind === 'command').length).toBe(
-      row.path.startsWith('the old socket drops') ? 1 : 2,
-    );
-  });
-
-  it('stop during a refresh handover abandons both clients', async () => {
-    const spy = unhandledSpy();
-    try {
-      const { fake, gateway, events, logs } = await reconnecting({ requestTimeoutMs: 600_000 });
-      const hold = fake.failConnectionsOpen(['hold']);
-      await fake.disconnectWith('refresh_requested', { wait: false });
-      await hold.entered;
-      await gateway.stop();
-      const seen = { events: events.length, logs: logs.length, opens: opens(fake) };
-      hold.release();
-      await new Promise((resolve) => setTimeout(resolve, 300));
-      expect({ events: events.length, logs: logs.length, opens: opens(fake) }).toEqual(seen);
-      expect(events).toEqual(['up']);
-      await vi.waitFor(() => {
-        expect(fake.openSockets()).toBe(0);
-      });
-      expect(spy.unhandled).not.toHaveBeenCalled();
-    } finally {
-      spy.off();
-    }
   });
 
   it('reconnects after an abrupt close and logs close code 1006', async () => {
@@ -456,22 +305,6 @@ describe('Socket Mode reconnect', () => {
     } finally {
       spy.off();
     }
-  });
-
-  it('keeps the gateway up after a refresh handover closes the old socket', async () => {
-    const { fake, events, logs } = await reconnecting({ reconnect: fast });
-    await fake.disconnectWith('refresh_requested');
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(events).toEqual(['up']);
-    expect(lines(logs, 'slack socket down')).toEqual([]);
-    expect(lines(logs, 'slack socket refreshed')).toEqual([
-      {
-        level: 'info',
-        fields: { disconnectReason: 'refresh_requested' },
-        msg: 'slack socket refreshed',
-      },
-    ]);
-    await expect(fake.emitEnvelope('slash_commands', command)).resolves.toBeUndefined();
   });
 
   it('stop during a backoff sends no further apps.connections.open', async () => {

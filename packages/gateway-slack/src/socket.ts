@@ -297,8 +297,11 @@ export function createSocket(
         if (state !== 'up') return false;
         state = 'retired';
         ended.resolve(next);
-        // Its envelopes in flight still ack on this socket.
-        closing = Promise.allSettled([...inFlight]).then(disconnect);
+        // Its envelopes in flight, also those that arrive while it drains, still ack on this socket.
+        closing = (async () => {
+          while (inFlight.size > 0) await Promise.allSettled([...inFlight]);
+          await disconnect();
+        })();
         return true;
       },
       closed: () => closing,
@@ -365,7 +368,8 @@ export function createSocket(
   /**
    * Opens the replacement of the up attempt `old` at once; `old` keeps serving until the
    * replacement's hello. A replacement that fails leaves `old` serving, and its drop then runs
-   * the usual backoff.
+   * the usual backoff. A refresh notice while a replacement is connecting or closing is ignored:
+   * `old` serves until Slack closes it, then the usual loop runs.
    */
   function handover(appToken: string, old: Attempt, reason: string): void {
     if (replacement !== undefined) return;
@@ -374,7 +378,7 @@ export function createSocket(
     replacement = next;
     void next.outcome.then(async (outcome) => {
       if (outcome === 'up') return;
-      // One handover at a time: the next refresh notice waits until this client holds no socket.
+      // One handover at a time: a refresh notice is ignored until this client holds no socket.
       await next.closed();
       if (replacement === next) replacement = undefined;
     });
