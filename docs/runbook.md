@@ -102,8 +102,10 @@ socket, so only permanent failures show.
 
 After the socket drops, the daemon reconnects on its own until it stops: the first attempt
 waits about a second, and each failed attempt doubles the wait up to a minute. Slack also asks
-for a new connection now and then (`disconnectReason: refresh_requested`); that drop is
-followed by `slack socket up` within seconds. The log lines under `module: gateway-slack`:
+for a new connection now and then (`refresh_requested` or `warning`): the daemon opens the new
+connection at once and keeps serving on the old one until the new one is up, so a refresh is
+not a drop. If the new connection fails, the old one keeps serving until it drops. The log
+lines under `module: gateway-slack`:
 
 - `slack socket down` (warn): the connection dropped, with `disconnectReason` when Slack sent
   one, `closeCode` (1006 when the connection was cut without a close frame) and `socketError`
@@ -114,6 +116,10 @@ followed by `slack socket up` within seconds. The log lines under `module: gatew
   connect, with `failure` (`connections_open`, `closed_before_hello` or `hello_timeout`) and
   `err`.
 - `slack socket up` (info): connected, with the `attempt` that did it (0 at start).
+- `slack socket refreshing` (info): Slack asked for a new connection, with its
+  `disconnectReason`; the new connection is opening while the old one serves.
+- `slack socket refreshed` (info): the new connection is up and the old one closes, with the
+  same `disconnectReason`.
 
 **Check.**
 

@@ -25,6 +25,10 @@
   `packages/gateway-slack/src/socket.ts`): SDK autoReconnect is off, every `down` schedules an
   attempt on a fresh client until `stop()`, and SDK debug lines never reach the log
   (`packages/gateway-slack/test/socket.test.ts`, `describe('Socket Mode reconnect')`).
+- A refresh `disconnect` (`refresh_requested`, `warning`) is a handover, not a drop:
+  `RefreshingClient` keeps the old socket serving, the replacement opens at once, and the old one
+  closes after the replacement's hello with no `connection` event. At most two clients live, only
+  during a handover.
 - `recover` works from its request alone (G10).
 - Yield `gap` whenever completeness cannot be proven (`recoverThreads` in
   `packages/gateway-slack/src/recover.ts`). Copy its `gap` cases, not the rate-limit wait in

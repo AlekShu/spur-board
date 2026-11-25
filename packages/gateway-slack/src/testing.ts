@@ -48,8 +48,11 @@ export interface FakeSlackApi {
   /**
    * Send a Socket Mode `disconnect` with `reason` on the live socket, wait up to 10 s for the next
    * socket to get its hello, then close the old socket if it is still open; resolves once it closed.
+   * With `wait: false` it resolves once the message is sent and leaves the old socket open.
    */
-  disconnectWith(reason: string): Promise<void>;
+  disconnectWith(reason: string, options?: { wait?: boolean }): Promise<void>;
+  /** How many Socket Mode connections are open, the live one included. */
+  openSockets(): number;
   /** Drop the live socket without a close frame; later sockets are still accepted. */
   terminateConnection(): Promise<void>;
   /**
@@ -680,15 +683,21 @@ export async function startFakeSlackApi(
       };
       return { entered: entered.promise, release };
     },
-    async disconnectWith(reason) {
+    async disconnectWith(reason, { wait = true } = {}) {
       const ws = connected;
       if (ws === undefined) throw new Error('no Socket Mode connection to disconnect');
+      const message = JSON.stringify({ type: 'disconnect', reason, debug_info: { host: 'fake' } });
+      if (!wait) {
+        ws.send(message);
+        return;
+      }
       const activated = nextActivation(10_000);
-      ws.send(JSON.stringify({ type: 'disconnect', reason, debug_info: { host: 'fake' } }));
+      ws.send(message);
       await activated;
       if (ws.readyState === WebSocket.OPEN) ws.close();
       await closed(ws);
     },
+    openSockets: () => [...sockets.clients].filter((ws) => ws.readyState === WebSocket.OPEN).length,
     async terminateConnection() {
       const ws = connected;
       if (ws === undefined) throw new Error('no Socket Mode connection to terminate');

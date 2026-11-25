@@ -147,22 +147,51 @@ function unrecoverable(err: unknown): boolean {
   return err instanceof WebAPIPlatformError && codes.includes(err.data.error);
 }
 
+/** Slack's `disconnect` reasons that ask for a new connection while the old one still serves. */
+const refreshReasons: readonly string[] = ['refresh_requested', 'warning'];
+
+/**
+ * An SDK client that hands a refresh `disconnect` to the gateway. With its reconnect off the SDK
+ * would close the socket at once; this client keeps it open when `onRefresh` takes the notice.
+ */
+class RefreshingClient extends SocketModeClient {
+  onRefresh: (reason: string) => boolean = () => false;
+
+  protected override async onWebSocketMessage(
+    ...args: Parameters<SocketModeClient['onWebSocketMessage']>
+  ): Promise<void> {
+    const [data, isBinary] = args;
+    const reason = isBinary ? undefined : disconnectReasonOf(data);
+    if (reason !== undefined && refreshReasons.includes(reason) && this.onRefresh(reason)) return;
+    await super.onWebSocketMessage(...args);
+  }
+}
+
 type Outcome = 'up' | 'failed' | 'abandoned';
 
 interface Attempt {
   outcome: Promise<Outcome>;
-  /** Resolves when an `up` attempt drops or stop cuts it off. */
-  ended: Promise<void>;
+  /**
+   * Resolves when an `up` attempt drops or stop cuts it off, or with its replacement once that
+   * replacement got its hello.
+   */
+  ended: Promise<Attempt | undefined>;
   /** Settles a connecting attempt as abandoned and ends an up one, emitting nothing. */
   abandon(): void;
+  /**
+   * Ends an up attempt in favour of `next`, emitting nothing, and closes its socket once its
+   * envelopes in flight settle; false when it was no longer up.
+   */
+  retire(next: Attempt): boolean;
   /** Resolves once the client holds no socket. */
   closed(): Promise<void>;
 }
 
 /**
  * The gateway owns transport reconnects: every drop after an `up` schedules attempts with
- * jittered backoff until `stop()`, each on a fresh SDK client with its reconnect turned off. This
- * layer also owns sink-before-ack ordering.
+ * jittered backoff until `stop()`, each on a fresh SDK client with its reconnect turned off. A
+ * refresh `disconnect` opens the replacement at once while the old socket keeps serving; the old
+ * one closes after the replacement's hello. This layer also owns sink-before-ack ordering.
  */
 export function createSocket(
   api: WebClient,
@@ -174,6 +203,9 @@ export function createSocket(
   const helloTimeoutMs = config.reconnect?.helloTimeoutMs ?? 30_000;
   let started = false;
   let current: Attempt | undefined;
+  // During a handover: the replacement connecting, then the old attempt closing.
+  let replacement: Attempt | undefined;
+  let retiring: Attempt | undefined;
   let supervisor: Promise<void> | undefined;
   let halt = new AbortController();
   let sink: InboundSink | undefined;
@@ -195,18 +227,28 @@ export function createSocket(
     );
   }
 
-  /** One connection attempt on a fresh client; `number` is 0 for the first start. */
-  function connect(appToken: string, number: number): Attempt {
+  /**
+   * One connection attempt on a fresh client; `number` is 0 for the first start. A handover
+   * attempt names the up attempt it `replaces` and the reason Slack gave.
+   */
+  function connect(
+    appToken: string,
+    number: number,
+    replaces?: { attempt: Attempt; reason: string },
+  ): Attempt {
     const record: SocketRecord = {};
     let disconnectReason: string | undefined;
     const outcome = Promise.withResolvers<Outcome>();
-    const ended = Promise.withResolvers<undefined>();
+    const ended = Promise.withResolvers<Attempt | undefined>();
+    const inFlight = new Set<Promise<void>>();
     let closing: Promise<void> = Promise.resolve();
-    // `connecting` until hello or failure; `up` until its drop is logged or stop cuts it off.
-    let state: 'connecting' | Outcome | 'down' = 'connecting';
-    // A failed or abandoned attempt, or an up one whose drop is logged, says nothing more.
+    let disconnecting: Promise<void> | undefined;
+    // `connecting` until hello or failure; `up` until its drop is logged, stop cuts it off or its
+    // replacement takes over (`retired`).
+    let state: 'connecting' | Outcome | 'down' | 'retired' = 'connecting';
+    // A failed, abandoned or retired attempt, or an up one whose drop is logged, says nothing more.
     const quiet = () => state !== 'connecting' && state !== 'up';
-    const client = new SocketModeClient({
+    const client = new RefreshingClient({
       appToken,
       autoReconnectEnabled: false,
       logger: createSdkLogger(record, (level, detail) => {
@@ -219,6 +261,7 @@ export function createSocket(
         ...(config.apiUrl === undefined ? {} : { slackApiUrl: config.apiUrl }),
       },
     });
+    const disconnect = () => (disconnecting ??= client.disconnect());
     const socketFields = () => ({
       ...(disconnectReason === undefined ? {} : { disconnectReason }),
       closeCode: record.closeCode ?? 1006,
@@ -244,19 +287,33 @@ export function createSocket(
           clearTimeout(helloTimer);
           outcome.resolve('abandoned');
         }
-        if (state === 'connecting' || state === 'up') {
+        if (state === 'connecting' || state === 'up' || state === 'retired') {
           state = 'abandoned';
-          closing = client.disconnect();
+          closing = disconnect();
         }
         ended.resolve(undefined);
+      },
+      retire(next) {
+        if (state !== 'up') return false;
+        state = 'retired';
+        ended.resolve(next);
+        // Its envelopes in flight still ack on this socket.
+        closing = Promise.allSettled([...inFlight]).then(disconnect);
+        return true;
       },
       closed: () => closing,
     };
     const helloTimer = setTimeout(() => {
       fail({ failure: 'hello_timeout' });
       // The state is failed first, so the `disconnected` this emits is ignored.
-      closing = client.disconnect();
+      closing = disconnect();
     }, helloTimeoutMs);
+    client.onRefresh = (reason) => {
+      if (state !== 'up' || stopping) return false;
+      disconnectReason = reason;
+      handover(appToken, attempt, reason);
+      return true;
+    };
     client.on('ws_message', (data: unknown) => {
       disconnectReason = disconnectReasonOf(data) ?? disconnectReason;
     });
@@ -264,8 +321,20 @@ export function createSocket(
       if (state !== 'connecting') return;
       state = 'up';
       clearTimeout(helloTimer);
-      log('info', { attempt: number }, 'slack socket up');
-      connectionEvent('up');
+      const old = replaces?.attempt;
+      if (old?.retire(attempt) === true) {
+        // The replacement serves from here; the old socket closes behind it.
+        current = attempt;
+        replacement = undefined;
+        retiring = old;
+        void old.closed().then(() => {
+          if (retiring === old) retiring = undefined;
+        });
+        log('info', { disconnectReason: replaces?.reason }, 'slack socket refreshed');
+      } else {
+        log('info', { attempt: number }, 'slack socket up');
+        connectionEvent('up');
+      }
       outcome.resolve('up');
     });
     client.on('disconnected', () => {
@@ -280,7 +349,11 @@ export function createSocket(
       ended.resolve(undefined);
     });
     client.on('slack_event', (envelope: Envelope) => {
-      if (state === 'up') track(handle(envelope), 'envelope');
+      if (state !== 'up' && state !== 'retired') return;
+      const work = handle(envelope);
+      inFlight.add(work);
+      void work.catch(() => undefined).finally(() => inFlight.delete(work));
+      track(work, 'envelope');
     });
     // Its result is read from the events above; an abandoned start settles unobserved.
     client.start().catch((err: unknown) => {
@@ -289,30 +362,63 @@ export function createSocket(
     return attempt;
   }
 
+  /**
+   * Opens the replacement of the up attempt `old` at once; `old` keeps serving until the
+   * replacement's hello. A replacement that fails leaves `old` serving, and its drop then runs
+   * the usual backoff.
+   */
+  function handover(appToken: string, old: Attempt, reason: string): void {
+    if (replacement !== undefined) return;
+    log('info', { disconnectReason: reason }, 'slack socket refreshing');
+    const next = connect(appToken, 1, { attempt: old, reason });
+    replacement = next;
+    void next.outcome.then(async (outcome) => {
+      if (outcome === 'up') return;
+      // One handover at a time: the next refresh notice waits until this client holds no socket.
+      await next.closed();
+      if (replacement === next) replacement = undefined;
+    });
+  }
+
   /** Reconnects after every drop until stop; stopping is its only exit. */
   async function supervise(appToken: string, first: Attempt): Promise<void> {
-    await first.ended;
+    let serving = first;
     let attempt = 0;
-    while (!stopping) {
-      attempt += 1;
-      const delayMs = reconnectDelay(attempt, { baseDelayMs, maxDelayMs }, Math.random);
-      log('info', { attempt, delayMs }, 'slack socket reconnecting');
-      try {
-        await sleep(delayMs, undefined, { signal: halt.signal, ref: false });
-      } catch {
-        return;
+    for (;;) {
+      const handedTo = await serving.ended;
+      if (stopping) return;
+      if (handedTo !== undefined) {
+        serving = handedTo;
+        continue;
       }
-      // The sleep may have finished in the turn stop() aborted it.
-      if (halt.signal.aborted) return;
-      const next = connect(appToken, attempt);
-      current = next;
-      if ((await next.outcome) === 'up') {
-        // Stop ends an up attempt, so this wait cannot outlive it.
-        attempt = 0;
-        await next.ended;
-      } else {
+      // A replacement still connecting when the old socket dropped becomes the next attempt.
+      let next = replacement;
+      replacement = undefined;
+      if (next !== undefined) attempt = 1;
+      for (;;) {
+        if (next === undefined) {
+          attempt += 1;
+          const delayMs = reconnectDelay(attempt, { baseDelayMs, maxDelayMs }, Math.random);
+          log('info', { attempt, delayMs }, 'slack socket reconnecting');
+          try {
+            await sleep(delayMs, undefined, { signal: halt.signal, ref: false });
+          } catch {
+            return;
+          }
+          // The sleep may have finished in the turn stop() aborted it.
+          if (halt.signal.aborted) return;
+          next = connect(appToken, attempt);
+        }
+        current = next;
+        if ((await next.outcome) === 'up') {
+          // Stop ends an up attempt, so the wait on it cannot outlive it.
+          attempt = 0;
+          serving = next;
+          break;
+        }
         // At most one live socket: a timed-out attempt closes before the next one opens.
         await next.closed();
+        next = undefined;
       }
     }
   }
@@ -407,11 +513,13 @@ export function createSocket(
     async stop() {
       stopping = true;
       halt.abort();
-      const attempt = current;
+      const attempts = [current, replacement, retiring].filter((attempt) => attempt !== undefined);
       current = undefined;
+      replacement = undefined;
+      retiring = undefined;
       // Never waits for an in-flight apps.connections.open: an abandoned client opens no socket.
-      attempt?.abandon();
-      await attempt?.closed();
+      for (const attempt of attempts) attempt.abandon();
+      await Promise.all(attempts.map((attempt) => attempt.closed()));
       await supervisor;
       supervisor = undefined;
       while (pending.size > 0) await Promise.allSettled([...pending]);
