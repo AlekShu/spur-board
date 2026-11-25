@@ -21,6 +21,10 @@
 
 - Emit `connection` `up` after every connect, the first included, and `down` only on a real
   loss (G13). Core runs `recover` on `up`.
+- The Slack gateway owns its reconnect loop (`createSocket` in
+  `packages/gateway-slack/src/socket.ts`): SDK autoReconnect is off, every `down` schedules an
+  attempt on a fresh client until `stop()`, and SDK debug lines never reach the log
+  (`packages/gateway-slack/test/socket.test.ts`, `describe('Socket Mode reconnect')`).
 - `recover` works from its request alone (G10).
 - Yield `gap` whenever completeness cannot be proven (`recoverThreads` in
   `packages/gateway-slack/src/recover.ts`). Copy its `gap` cases, not the rate-limit wait in
