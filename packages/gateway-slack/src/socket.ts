@@ -150,9 +150,6 @@ function unrecoverable(err: unknown): boolean {
 type Outcome = 'up' | 'failed' | 'abandoned';
 
 interface Attempt {
-  client: SocketModeClient;
-  /** `connecting` until hello or failure; `up` until its drop is logged or stop cuts it off. */
-  state: 'connecting' | Outcome | 'down';
   outcome: Promise<Outcome>;
   /** Resolves when an `up` attempt drops or stop cuts it off. */
   ended: Promise<void>;
@@ -205,8 +202,10 @@ export function createSocket(
     const outcome = Promise.withResolvers<Outcome>();
     const ended = Promise.withResolvers<undefined>();
     let closing: Promise<void> = Promise.resolve();
+    // `connecting` until hello or failure; `up` until its drop is logged or stop cuts it off.
+    let state: 'connecting' | Outcome | 'down' = 'connecting';
     // A failed or abandoned attempt, or an up one whose drop is logged, says nothing more.
-    const quiet = () => attempt.state !== 'connecting' && attempt.state !== 'up';
+    const quiet = () => state !== 'connecting' && state !== 'up';
     const client = new SocketModeClient({
       appToken,
       autoReconnectEnabled: false,
@@ -227,8 +226,8 @@ export function createSocket(
       ...(record.socketError === undefined ? {} : { socketError: record.socketError }),
     });
     function fail(fields: Record<string, unknown>, err?: unknown): void {
-      if (attempt.state !== 'connecting') return;
-      attempt.state = 'failed';
+      if (state !== 'connecting') return;
+      state = 'failed';
       clearTimeout(helloTimer);
       log(
         unrecoverable(err) ? 'error' : 'warn',
@@ -238,17 +237,15 @@ export function createSocket(
       outcome.resolve('failed');
     }
     const attempt: Attempt = {
-      client,
-      state: 'connecting',
       outcome: outcome.promise,
       ended: ended.promise,
       abandon() {
-        if (attempt.state === 'connecting') {
+        if (state === 'connecting') {
           clearTimeout(helloTimer);
           outcome.resolve('abandoned');
         }
-        if (attempt.state === 'connecting' || attempt.state === 'up') {
-          attempt.state = 'abandoned';
+        if (state === 'connecting' || state === 'up') {
+          state = 'abandoned';
           closing = client.disconnect();
         }
         ended.resolve(undefined);
@@ -264,26 +261,26 @@ export function createSocket(
       disconnectReason = disconnectReasonOf(data) ?? disconnectReason;
     });
     client.on('connected', () => {
-      if (attempt.state !== 'connecting') return;
-      attempt.state = 'up';
+      if (state !== 'connecting') return;
+      state = 'up';
       clearTimeout(helloTimer);
       log('info', { attempt: number }, 'slack socket up');
       connectionEvent('up');
       outcome.resolve('up');
     });
     client.on('disconnected', () => {
-      if (attempt.state === 'connecting') {
+      if (state === 'connecting') {
         fail({ failure: 'closed_before_hello', ...socketFields() });
         return;
       }
-      if (attempt.state !== 'up') return;
+      if (state !== 'up') return;
       log('warn', socketFields(), 'slack socket down');
-      attempt.state = 'down';
+      state = 'down';
       connectionEvent('down');
       ended.resolve(undefined);
     });
     client.on('slack_event', (envelope: Envelope) => {
-      if (attempt.state === 'up') track(handle(envelope), 'envelope');
+      if (state === 'up') track(handle(envelope), 'envelope');
     });
     // Its result is read from the events above; an abandoned start settles unobserved.
     client.start().catch((err: unknown) => {
@@ -294,32 +291,29 @@ export function createSocket(
 
   /** Reconnects after every drop until stop; stopping is its only exit. */
   async function supervise(appToken: string, first: Attempt): Promise<void> {
-    let live = first;
-    for (;;) {
-      await live.ended;
-      let attempt = 0;
-      while (!stopping) {
-        attempt += 1;
-        const delayMs = reconnectDelay(attempt, { baseDelayMs, maxDelayMs }, Math.random);
-        log('info', { attempt, delayMs }, 'slack socket reconnecting');
-        try {
-          await sleep(delayMs, undefined, { signal: halt.signal, ref: false });
-        } catch {
-          return;
-        }
-        // The sleep may have finished in the turn stop() aborted it.
-        if (halt.signal.aborted) return;
-        const next = connect(appToken, attempt);
-        current = next;
-        const outcome = await next.outcome;
-        if (outcome === 'up') {
-          live = next;
-          break;
-        }
+    await first.ended;
+    let attempt = 0;
+    while (!stopping) {
+      attempt += 1;
+      const delayMs = reconnectDelay(attempt, { baseDelayMs, maxDelayMs }, Math.random);
+      log('info', { attempt, delayMs }, 'slack socket reconnecting');
+      try {
+        await sleep(delayMs, undefined, { signal: halt.signal, ref: false });
+      } catch {
+        return;
+      }
+      // The sleep may have finished in the turn stop() aborted it.
+      if (halt.signal.aborted) return;
+      const next = connect(appToken, attempt);
+      current = next;
+      if ((await next.outcome) === 'up') {
+        // Stop ends an up attempt, so this wait cannot outlive it.
+        attempt = 0;
+        await next.ended;
+      } else {
         // At most one live socket: a timed-out attempt closes before the next one opens.
         await next.closed();
       }
-      if (stopping) return;
     }
   }
 
