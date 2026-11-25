@@ -249,7 +249,9 @@ export function createSpurAdapter(options: SpurAdapterOptions): Adapter {
     endReason: 'complete' | 'kill' | null,
   ): SessionFacts {
     const links = Object.fromEntries(
-      (wire.slots?.links ?? []).map(({ label, url }) => [label, url]),
+      (wire.slots?.links ?? [])
+        .filter(({ url }) => sessionFactsSchema.shape.links.valueType.safeParse(url).success)
+        .map(({ label, url }) => [label, url]),
     );
     const prUrl = links['pr'];
     let pr: SessionFacts['pr'] = null;

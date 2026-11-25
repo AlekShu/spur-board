@@ -259,6 +259,36 @@ describe('Spur adapter', () => {
     }
   });
 
+  it('observes all sessions when another session publishes a local artifact URL', async () => {
+    const adapter = createSpurAdapter({
+      ...adapterOptions,
+      fetch: () =>
+        Promise.resolve(
+          response([
+            {
+              ...wire,
+              id: 'another-worker',
+              slots: {
+                links: [
+                  ...wire.slots.links,
+                  { label: 'report', url: 'file:///example/report.html' },
+                ],
+              },
+            },
+            wire,
+          ]),
+        ),
+    });
+    const batch = await adapter.poll(context([wire.id]));
+    expect(batchSchema.parse(batch).items).toHaveLength(2);
+    expect(batch.items[0]?.facts).toMatchObject({
+      id: 'another-worker',
+      links: Object.fromEntries(wire.slots.links.map(({ label, url }) => [label, url])),
+    });
+    expect(batch.items[0]?.facts).not.toHaveProperty('links.report');
+    expect(batch.entities).toEqual([{ ref: { kind: 'session', id: wire.id }, status: 'ok' }]);
+  });
+
   it.each([
     ['an absent queue', undefined],
     ['an empty queue', { messages: [], awaitingPrompt: false }],
