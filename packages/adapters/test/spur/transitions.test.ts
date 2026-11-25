@@ -92,7 +92,7 @@ describe('Spur transition feed', () => {
     expect(batch.items[0]?.facts).toMatchObject({ health: 'working' });
   });
 
-  it('bounds each tick to four pages and resumes raw positions after recreation', async () => {
+  it('bounds each tick to one page and resumes raw positions after recreation', async () => {
     const seen: string[] = [];
     const fetcher: typeof fetch = (input) => {
       const url = new URL(input instanceof Request ? input.url : input);
@@ -100,7 +100,7 @@ describe('Spur transition feed', () => {
       const since = url.searchParams.get('since') ?? 'position-0';
       seen.push(since);
       const start = Number(since.slice('position-'.length));
-      const size = Math.min(1000, 4001 - start);
+      const size = Math.min(1000, 1001 - start);
       return Promise.resolve(
         Response.json({
           entries: Array.from({ length: size }, (_, index) => ({
@@ -108,24 +108,18 @@ describe('Spur transition feed', () => {
             cursor: `position-${String(start + index + 1)}`,
           })),
           nextCursor: `position-${String(start + size)}`,
-          hasMore: start + size < 4001,
+          hasMore: start + size < 1001,
         }),
       );
     };
     const first = await adapter(fetcher).poll(context());
-    expect(first.sessionTransitions).toHaveLength(4000);
-    expect(first.cursor).toBe('position-4000');
+    expect(first.sessionTransitions).toHaveLength(1000);
+    expect(first.cursor).toBe('position-1000');
     expect(first.items).toHaveLength(1);
     const second = await adapter(fetcher).poll(context(first.cursor));
     expect(second.sessionTransitions).toHaveLength(1);
-    expect(second.cursor).toBe('position-4001');
-    expect(seen).toEqual([
-      'position-0',
-      'position-1000',
-      'position-2000',
-      'position-3000',
-      'position-4000',
-    ]);
+    expect(second.cursor).toBe('position-1001');
+    expect(seen).toEqual(['position-0', 'position-1000']);
   });
 
   it('bootstraps a foreign stored cursor and resumes strict-after the fresh baseline with full snapshots', async () => {
@@ -172,7 +166,7 @@ describe('Spur transition feed', () => {
     ]);
   });
 
-  it('counts foreign-cursor recovery toward the four-request budget and persists partial bootstrap progress', async () => {
+  it('persists one bootstrap page before continuing a replacement stream', async () => {
     const sinceValues: (string | null)[] = [];
     const fetcher: typeof fetch = (input) => {
       const url = new URL(input instanceof Request ? input.url : input);
@@ -193,23 +187,13 @@ describe('Spur transition feed', () => {
       );
     };
     const capped = await adapter(fetcher).poll(context('foreign-stored'));
-    expect(capped.sessionTransitions?.map(({ position }) => position)).toEqual([
-      'replacement-1',
-      'replacement-2',
-      'replacement-3',
-    ]);
-    expect(capped.cursor).toBe('replacement-3');
+    expect(capped.sessionTransitions?.map(({ position }) => position)).toEqual(['replacement-1']);
+    expect(capped.cursor).toBe('replacement-1');
     expect(capped.items).toHaveLength(1);
     const next = await adapter(fetcher).poll(context(capped.cursor));
-    expect(next.sessionTransitions?.map(({ position }) => position)).toEqual(['replacement-4']);
-    expect(next.cursor).toBe('replacement-4');
-    expect(sinceValues).toEqual([
-      'foreign-stored',
-      null,
-      'replacement-1',
-      'replacement-2',
-      'replacement-3',
-    ]);
+    expect(next.sessionTransitions?.map(({ position }) => position)).toEqual(['replacement-2']);
+    expect(next.cursor).toBe('replacement-2');
+    expect(sinceValues).toEqual(['foreign-stored', null, 'replacement-1']);
   });
 
   it.each([
@@ -240,7 +224,7 @@ describe('Spur transition feed', () => {
     expect(calls).toBe(1);
   });
 
-  it('rejects the cursor message without a stored position or on a later page', async () => {
+  it('rejects the cursor message without a stored position or on a bootstrap retry', async () => {
     let calls = 0;
     const error = () =>
       Response.json({ error: 'Invalid or foreign transitions cursor' }, { status: 400 });
@@ -254,11 +238,7 @@ describe('Spur transition feed', () => {
     calls = 0;
     const later = adapter(() => {
       calls++;
-      return Promise.resolve(
-        calls === 1
-          ? Response.json({ entries: [edge], nextCursor: edge.cursor, hasMore: true })
-          : error(),
-      );
+      return Promise.resolve(error());
     });
     await expect(later.poll(context('stored'))).rejects.toMatchObject({ kind: 'transient' });
     expect(calls).toBe(2);
@@ -320,12 +300,13 @@ describe('Spur transition feed', () => {
   });
 
   it.each(['malformed', '500', '400', 'invalid410', 'duplicate'])(
-    'rejects a later %s page without returning progress',
+    'rejects a resumed %s page without advancing past the accepted cursor',
     async (failure) => {
       const ctx = context('original');
       let calls = 0;
       const source = adapter((input) => {
         const url = new URL(input instanceof Request ? input.url : input);
+        if (url.pathname === '/sessions') return Promise.resolve(Response.json([session]));
         expect(url.pathname).toBe('/sessions/transitions');
         calls++;
         if (calls === 1)
@@ -344,7 +325,9 @@ describe('Spur transition feed', () => {
           }),
         );
       });
-      await expect(source.poll(ctx)).rejects.toMatchObject({ kind: 'transient' });
+      const first = await source.poll(ctx);
+      expect(first.cursor).toBe(edge.cursor);
+      await expect(source.poll(context(first.cursor))).rejects.toMatchObject({ kind: 'transient' });
       expect(calls).toBe(2);
     },
   );
@@ -370,14 +353,14 @@ describe('Spur transition feed', () => {
   });
 });
 
-it('propagates an abort on the second page without reading snapshots or returning progress', async () => {
+it('propagates an abort during cursor recovery without reading snapshots or returning progress', async () => {
   const controller = new AbortController();
   let calls = 0;
   const source = adapter((_input, init) => {
     calls++;
     if (calls === 1)
       return Promise.resolve(
-        Response.json({ entries: [edge], nextCursor: edge.cursor, hasMore: true }),
+        Response.json({ error: 'Invalid or foreign transitions cursor' }, { status: 400 }),
       );
     return new Promise((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => {
@@ -386,7 +369,7 @@ it('propagates an abort on the second page without reading snapshots or returnin
       controller.abort();
     });
   });
-  await expect(source.poll({ ...context(), signal: controller.signal })).rejects.toThrow(
+  await expect(source.poll({ ...context('foreign'), signal: controller.signal })).rejects.toThrow(
     'Spur poll aborted',
   );
   expect(calls).toBe(2);

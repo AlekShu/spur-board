@@ -1,4 +1,9 @@
-import { AdapterError, batchSchema, type PollContext } from '@spur-board/contracts';
+import {
+  AdapterError,
+  batchSchema,
+  sourceCursorSchema,
+  type PollContext,
+} from '@spur-board/contracts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startRunner, type AdapterRunner, type PollFailure } from '../../src/runner/runner.ts';
 import {
@@ -633,49 +638,56 @@ describe('Spur adapter', () => {
       durationMs: 15_000,
     };
 
-    it('reconciles after a slow feed page and resumes it on the next poll', async () => {
-      const positions: (string | null)[] = [];
-      const signals: (AbortSignal | null | undefined)[] = [];
-      const source = createRealSpurAdapter({
-        ...adapterOptions,
-        intervalMs: 60_000,
-        fetch: (input, init) => {
-          const url = requestUrl(input);
-          signals.push(init?.signal);
-          if (url.pathname === '/sessions')
-            return after(11_000, () =>
-              response([{ ...wire, queuedMessages: { messages: ['check (N1-1)'] } }]),
-            );
-          const since = url.searchParams.get('since');
-          positions.push(since);
-          if (since !== null) return Promise.resolve(emptyPage());
-          return after(38_000, morePages);
-        },
-      });
-      const first = source.poll(context());
-      await vi.advanceTimersByTimeAsync(49_000);
-      const batch = await first;
-      expect(positions).toEqual([null]);
-      expect(signals.map((signal) => signal?.aborted)).toEqual([false, false]);
-      expect(batch.cursor).toBe('c1');
-      expect(batch.items[0]?.facts).toMatchObject({ queuedRings: [{ notification: 1, ring: 1 }] });
-      const second = source.poll({ ...context(), cursor: batch.cursor });
-      await vi.advanceTimersByTimeAsync(11_000);
-      await second;
-      expect(positions).toEqual([null, 'c1']);
-    });
+    it.each([10_499, 38_000])(
+      'reconciles after a %d ms feed page and resumes on the next poll',
+      async (pageMs) => {
+        const positions: (string | null)[] = [];
+        const signals: (AbortSignal | null | undefined)[] = [];
+        const source = createRealSpurAdapter({
+          ...adapterOptions,
+          intervalMs: 60_000,
+          fetch: (input, init) => {
+            const url = requestUrl(input);
+            signals.push(init?.signal);
+            if (url.pathname === '/sessions')
+              return after(11_000, () =>
+                response([{ ...wire, queuedMessages: { messages: ['check (N1-1)'] } }]),
+              );
+            const since = url.searchParams.get('since');
+            positions.push(since);
+            if (since !== null) return Promise.resolve(emptyPage());
+            return after(pageMs, morePages);
+          },
+        });
+        const first = source.poll(context());
+        await vi.advanceTimersByTimeAsync(pageMs + 11_000);
+        const batch = await first;
+        expect(positions).toEqual([null]);
+        expect(signals.map((signal) => signal?.aborted)).toEqual([false, false]);
+        expect(batch.cursor).toBe('c1');
+        expect(batch.items[0]?.facts).toMatchObject({
+          queuedRings: [{ notification: 1, ring: 1 }],
+        });
+        const second = source.poll({ ...context(), cursor: batch.cursor });
+        await vi.advanceTimersByTimeAsync(11_000);
+        await second;
+        expect(positions).toEqual([null, 'c1']);
+      },
+    );
 
-    it('caps all feed pages at one minute even on a longer poll interval', async () => {
+    it('caps the feed and foreign-cursor recovery together at one minute', async () => {
       let pages = 0;
       const source = createRealSpurAdapter({
         ...adapterOptions,
         intervalMs: 120_000,
         fetch: (_input, init) => {
           pages++;
-          return pages === 1 ? after(20_000, morePages) : hang(init);
+          return pages === 1
+            ? after(20_000, () => response({ error: 'Invalid or foreign transitions cursor' }, 400))
+            : hang(init);
         },
       });
-      const poll = source.poll(context());
+      const poll = source.poll({ ...context(), cursor: sourceCursorSchema.parse('foreign') });
       const assertion = expect(poll).rejects.toMatchObject({
         path: 'sessions/transitions',
         page: 2,

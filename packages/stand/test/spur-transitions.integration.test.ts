@@ -80,7 +80,7 @@ it('commits bounded feed progress, survives recreation and journals a delayed li
     update({ status: 'killed' });
     now += 15_000;
     const capped = await poll();
-    expect(capped.sessionTransitions).toHaveLength(4000);
+    expect(capped.sessionTransitions).toHaveLength(1000);
     expect(capped.items).toHaveLength(1);
     expect(capped.items[0]?.facts).toMatchObject({ lifecycle: 'killed', endReason: 'kill' });
     expect(capped.sessionTransitions?.some((edge) => edge.to === 'killed')).toBe(false);
@@ -92,6 +92,12 @@ it('commits bounded feed progress, survives recreation and journals a delayed li
     store = openStore(file);
     core = createObservationCore({ store, config, clock });
     expect((await core.context('spur')).cursor).toBe(capped.cursor);
+    for (let page = 0; page < 3; page++) {
+      now += 15_000;
+      const catchup = await poll();
+      expect(catchup.sessionTransitions).toHaveLength(1000);
+      expect(catchup.sessionTransitions?.some((edge) => edge.to === 'killed')).toBe(false);
+    }
     now += 15_000;
     const delayed = await poll();
     expect(delayed.sessionTransitions).toHaveLength(1);

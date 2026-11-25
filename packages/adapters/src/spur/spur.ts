@@ -126,8 +126,7 @@ function queuedBoardRings(wire: SessionWire): { notification: number; ring: numb
 export function createSpurAdapter(options: SpurAdapterOptions): Adapter {
   const base = apiBaseUrl(options.baseUrl);
   const fetchImpl = options.fetch ?? fetch;
-  // Spur refreshes the whole inventory per feed page. Share one budget across catch-up
-  // pages and allow slower inventories more time when the operator polls less often.
+  // Allow slower inventories more time when the operator polls less often.
   const transitionsBudgetMs = Math.min(60_000, Math.max(15_000, options.intervalMs));
   const listTimeoutMs = transitionsBudgetMs / 3;
   let health = new Map<string, HealthObservation>();
@@ -298,7 +297,9 @@ export function createSpurAdapter(options: SpurAdapterOptions): Adapter {
       let cursor = ctx.cursor;
       const sessionTransitions: NonNullable<Batch['sessionTransitions']> = [];
       const positions = new Set<string>();
-      for (let page = 0; page < 4; page++) {
+      // Each feed request refreshes the whole inventory. Accept one page per snapshot.
+      // The second request is solely for recovery from a foreign cursor.
+      for (let page = 0; page < 2; page++) {
         const query = new URLSearchParams({ limit: '1000', kinds: 'status,state' });
         if (cursor !== undefined) query.set('since', cursor);
         const transitions = await request(
@@ -314,8 +315,7 @@ export function createSpurAdapter(options: SpurAdapterOptions): Adapter {
           response.status === 400 &&
           foreignCursorWire.safeParse(body).success
         ) {
-          // A replacement stream cannot use the stored position. Bootstrap once; this failed
-          // request consumes one of the four slots, and only a validated batch replaces it.
+          // A replacement stream cannot use the stored position. Bootstrap once.
           cursor = undefined;
           continue;
         }
@@ -353,9 +353,7 @@ export function createSpurAdapter(options: SpurAdapterOptions): Adapter {
         if (feed.hasMore && (feed.nextCursor === cursor || feed.entries.length === 0))
           throw new AdapterError('transient', 'Spur transitions made no progress');
         cursor = feed.nextCursor;
-        // Reconcile the full snapshot now when another similar page would exhaust the
-        // budget. The accepted cursor resumes catch-up on the next poll.
-        if (!feed.hasMore || options.now() + transitions.place.durationMs >= feedDeadline) break;
+        break;
       }
       const list = await request('sessions', ctx.signal, listTimeoutMs);
       const { response: listResponse, body: listBody } = list;
