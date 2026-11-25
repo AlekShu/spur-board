@@ -543,6 +543,23 @@ describe('Spur adapter', () => {
 
   describe('request timeouts and failure places', () => {
     const emptyPage = () => response({ entries: [], nextCursor: 'c1', hasMore: false });
+    const morePages = () =>
+      response({
+        entries: [
+          {
+            cursor: 'c1',
+            sessionId: wire.id,
+            project: wire.project,
+            at: at(0),
+            links: [],
+            kind: 'state',
+            from: 'working',
+            to: 'waiting',
+          },
+        ],
+        nextCursor: 'c1',
+        hasMore: true,
+      });
     const hang = (init: RequestInit | undefined) =>
       new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => {
@@ -585,6 +602,59 @@ describe('Spur adapter', () => {
       page: 1,
       durationMs: 15_000,
     };
+
+    it('reconciles after a slow feed page and resumes it on the next poll', async () => {
+      const positions: (string | null)[] = [];
+      const signals: (AbortSignal | null | undefined)[] = [];
+      const source = createRealSpurAdapter({
+        ...adapterOptions,
+        intervalMs: 60_000,
+        fetch: (input, init) => {
+          const url = requestUrl(input);
+          signals.push(init?.signal);
+          if (url.pathname === '/sessions')
+            return after(11_000, () =>
+              response([{ ...wire, queuedMessages: { messages: ['check (N1-1)'] } }]),
+            );
+          const since = url.searchParams.get('since');
+          positions.push(since);
+          if (since !== null) return Promise.resolve(emptyPage());
+          return after(38_000, morePages);
+        },
+      });
+      const first = source.poll(context());
+      await vi.advanceTimersByTimeAsync(49_000);
+      const batch = await first;
+      expect(positions).toEqual([null]);
+      expect(signals.map((signal) => signal?.aborted)).toEqual([false, false]);
+      expect(batch.cursor).toBe('c1');
+      expect(batch.items[0]?.facts).toMatchObject({ queuedRings: [{ notification: 1, ring: 1 }] });
+      const second = source.poll({ ...context(), cursor: batch.cursor });
+      await vi.advanceTimersByTimeAsync(11_000);
+      await second;
+      expect(positions).toEqual([null, 'c1']);
+    });
+
+    it('caps all feed pages at one minute even on a longer poll interval', async () => {
+      let pages = 0;
+      const source = createRealSpurAdapter({
+        ...adapterOptions,
+        intervalMs: 120_000,
+        fetch: (_input, init) => {
+          pages++;
+          return pages === 1 ? after(20_000, morePages) : hang(init);
+        },
+      });
+      const poll = source.poll(context());
+      const assertion = expect(poll).rejects.toMatchObject({
+        path: 'sessions/transitions',
+        page: 2,
+        durationMs: 40_000,
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await assertion;
+      expect(pages).toBe(2);
+    });
 
     it('times out a transitions page after 15 seconds while waiting for headers', async () => {
       const poll = routed(hang).poll(context());

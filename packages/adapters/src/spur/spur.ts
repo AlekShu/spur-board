@@ -18,10 +18,8 @@ import { z } from 'zod';
 import { classifyHttpFailure } from '../runner/http.ts';
 import { parseWire } from '../runner/wire.ts';
 
-/** The timeout of `GET sessions` and `GET sessions/<id>`. */
+/** The timeout of a single-session read. */
 const REQUEST_TIMEOUT_MS = 5_000;
-/** The timeout of one `GET sessions/transitions` page: Spur refreshes every session on each one. */
-const TRANSITIONS_TIMEOUT_MS = 15_000;
 /** The longest wait between two failed Spur polls, so Spur load episodes blind the board briefly. */
 export const SPUR_MAX_BACKOFF_MS = 60_000;
 
@@ -128,6 +126,10 @@ function queuedBoardRings(wire: SessionWire): { notification: number; ring: numb
 export function createSpurAdapter(options: SpurAdapterOptions): Adapter {
   const base = apiBaseUrl(options.baseUrl);
   const fetchImpl = options.fetch ?? fetch;
+  // Spur refreshes the whole inventory per feed page. Share one budget across catch-up
+  // pages and allow slower inventories more time when the operator polls less often.
+  const transitionsBudgetMs = Math.min(60_000, Math.max(15_000, options.intervalMs));
+  const listTimeoutMs = transitionsBudgetMs / 3;
   let health = new Map<string, HealthObservation>();
   let instanceId: string | undefined;
   const unknownHealthValues = new Set<string>();
@@ -288,7 +290,9 @@ export function createSpurAdapter(options: SpurAdapterOptions): Adapter {
     id: 'spur',
     intervalMs: options.intervalMs,
     async poll(ctx: PollContext): Promise<Batch> {
-      const observedAt = new Date(options.now()).toISOString();
+      const started = options.now();
+      const observedAt = new Date(started).toISOString();
+      const feedDeadline = started + transitionsBudgetMs;
       let cursor = ctx.cursor;
       const sessionTransitions: NonNullable<Batch['sessionTransitions']> = [];
       const positions = new Set<string>();
@@ -298,7 +302,7 @@ export function createSpurAdapter(options: SpurAdapterOptions): Adapter {
         const transitions = await request(
           `sessions/transitions?${query.toString()}`,
           ctx.signal,
-          TRANSITIONS_TIMEOUT_MS,
+          Math.max(1, feedDeadline - options.now()),
           page + 1,
         );
         const { response, body } = transitions;
@@ -347,9 +351,11 @@ export function createSpurAdapter(options: SpurAdapterOptions): Adapter {
         if (feed.hasMore && (feed.nextCursor === cursor || feed.entries.length === 0))
           throw new AdapterError('transient', 'Spur transitions made no progress');
         cursor = feed.nextCursor;
-        if (!feed.hasMore) break;
+        // Reconcile the full snapshot now when another similar page would exhaust the
+        // budget. The accepted cursor resumes catch-up on the next poll.
+        if (!feed.hasMore || options.now() + transitions.place.durationMs >= feedDeadline) break;
       }
-      const list = await request('sessions', ctx.signal, REQUEST_TIMEOUT_MS);
+      const list = await request('sessions', ctx.signal, listTimeoutMs);
       const { response: listResponse, body: listBody } = list;
       if (!listResponse.ok) throw httpFailure(list);
       const listed = parseWire(z.array(sessionWire), listBody, 'Invalid Spur response');
