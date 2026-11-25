@@ -10,11 +10,6 @@ const connectionSchema = z.strictObject({
 });
 export type ConnectionRecord = z.output<typeof connectionSchema>;
 
-/** The `meta` key of one gateway's connection record. */
-export function connectionKey(gateway: string): string {
-  return `${KEY_PREFIX}${gateway}`;
-}
-
 /** Stores the gateway's last connection event; `at` becomes ISO-8601 UTC. */
 export async function writeConnection(
   trx: Trx,
@@ -22,10 +17,10 @@ export async function writeConnection(
   state: ConnectionRecord['state'],
   at: Date,
 ): Promise<void> {
-  const value = JSON.stringify(connectionSchema.parse({ state, at: at.toISOString() }));
+  const value = JSON.stringify({ state, at: at.toISOString() });
   await trx
     .insertInto('meta')
-    .values({ key: connectionKey(gateway), value })
+    .values({ key: `${KEY_PREFIX}${gateway}`, value })
     .onConflict((oc) => oc.column('key').doUpdateSet({ value }))
     .execute();
 }
